@@ -48,19 +48,51 @@ export function robustBounds(buffer, { lo = 0.02, hi = 0.98, maxSamples = 50000 
   return { min, max };
 }
 
-/**
- * Home camera from the scene bounds (controller-approved simplification of the brief's
- * "first-frame camera": the .splat carries no camera poses).
- *
- * Target = bounds center; the camera sits on the +Z side, raised 30 degrees, looking toward -Z.
- * ARCore's world origin is the device pose at session start, whose view direction is roughly -Z,
- * so this approximates the first frame's heading. Distance fits the bounding sphere into the
- * narrower of the vertical / horizontal fov.
- */
-export function homeView(bounds, fovDeg, aspect) {
+function centerAndRadius(bounds) {
   const c = [0, 1, 2].map((k) => (bounds.min[k] + bounds.max[k]) / 2);
   const half = [0, 1, 2].map((k) => (bounds.max[k] - bounds.min[k]) / 2);
-  const radius = Math.max(Math.hypot(half[0], half[1], half[2]), 0.1);
+  return { c, radius: Math.max(Math.hypot(half[0], half[1], half[2]), 0.1) };
+}
+
+/** True if p lies inside the bounds box expanded by `margin` (fraction of each extent). */
+export function insideBounds(p, bounds, margin = 0.1) {
+  return [p.x, p.y, p.z].every((v, k) => {
+    const pad = (bounds.max[k] - bounds.min[k]) * margin;
+    return v >= bounds.min[k] - pad && v <= bounds.max[k] + pad;
+  });
+}
+
+/**
+ * Home camera (the .splat carries no camera poses, so the first frame is approximated):
+ *
+ * ARCore's world origin IS the device pose when the session started, i.e. (almost exactly) the
+ * first captured frame's camera position, and the device then looks roughly along -Z. So when the
+ * origin lies inside the trimmed scene bounds (expanded 10%) — the normal "scanned from inside
+ * the room" case — the home camera sits at (0,0,0) looking level toward -Z, with the orbit target
+ * at (0,0,-d), d = the bounds centre's depth along -Z (at least 0.5 m).
+ * Otherwise (origin outside the scene) falls back to fitView().
+ */
+export function homeView(bounds, fovDeg, aspect) {
+  const origin = { x: 0, y: 0, z: 0 };
+  if (!insideBounds(origin, bounds, 0.1)) return fitView(bounds, fovDeg, aspect);
+  const { c, radius } = centerAndRadius(bounds);
+  const d = Math.max(0.5, -c[2]);
+  const reach = Math.hypot(c[0], c[1], c[2]) + radius;
+  return {
+    target: { x: 0, y: 0, z: -d },
+    position: origin,
+    near: Math.max(0.01, radius * 0.001),
+    far: Math.max(reach, d) * 10,
+  };
+}
+
+/**
+ * Bounds-fit view: target = bounds centre; the camera sits on the +Z side, raised 30 degrees,
+ * looking toward -Z, at a distance that fits the bounding sphere into the narrower of the
+ * vertical / horizontal fov.
+ */
+export function fitView(bounds, fovDeg, aspect) {
+  const { c, radius } = centerAndRadius(bounds);
   const vfov = (fovDeg * Math.PI) / 180;
   const hfov = 2 * Math.atan(Math.tan(vfov / 2) * aspect);
   const fov = Math.min(vfov, hfov);
@@ -76,6 +108,18 @@ export function homeView(bounds, fovDeg, aspect) {
     near: Math.max(0.01, radius * 0.001),
     far: (dist + radius) * 10,
   };
+}
+
+/**
+ * Resolves/rejects like `promise`, but rejects with Error(message) if it hasn't settled after ms.
+ * `timers` is injectable for tests.
+ */
+export function withTimeout(promise, ms, message = "timeout", timers = globalThis) {
+  let id;
+  const timeout = new Promise((_, reject) => {
+    id = timers.setTimeout(() => reject(new Error(message)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => timers.clearTimeout(id));
 }
 
 /** Cubic ease-in-out on t clamped to [0, 1]. */

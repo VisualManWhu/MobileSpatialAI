@@ -10,6 +10,27 @@
   </style>
 </head>
 <body>
+  <!-- Runs before the bundle: if viewer.js fails to load/parse or anything throws outside
+       boot()'s try, the app still gets exactly one onError instead of spinning forever. -->
+  <script>
+    (function () {
+      var reported = false;
+      window.__r3dReport = function (kind, arg) {
+        if (reported) return;
+        reported = true;
+        var a = window.Android;
+        if (!a) return;
+        if (kind === "loaded") a.onLoaded(arg); else a.onError(arg);
+      };
+      function fail(e) {
+        if (window.console) console.error("viewer error", e && (e.error || e.reason || e.message || e));
+        window.__r3dReport("error", "场景文件加载失败");
+      }
+      // capture=true also sees <script> resource load failures, which don't bubble.
+      window.addEventListener("error", fail, true);
+      window.addEventListener("unhandledrejection", fail);
+    })();
+  </script>
   <!-- Bundled three.js + Spark; everything is served from the APK assets (no network). -->
   <script type="module" src="viewer.js"></script>
 </body>

@@ -17,11 +17,15 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -34,6 +38,7 @@ import androidx.webkit.WebViewAssetLoader
 import dev.recon3d.rooms.RoomRepository
 import java.io.ByteArrayInputStream
 import java.io.FileInputStream
+import kotlinx.coroutines.delay
 
 private const val ASSET_HOST = "appassets.androidplatform.net"
 private const val VIEWER_URL =
@@ -42,6 +47,10 @@ private const val VIEWER_URL =
 private const val MSG_LOADING = "正在加载场景…"
 private const val MSG_NO_SCENE = "这次拍摄还没有可查看的场景"
 private const val MSG_PAGE_FAILED = "查看器页面加载失败"
+private const val MSG_RETRY = "重试"
+
+/** App-side watchdog: if the page never calls back, stop spinning (viewer.js times out at 45 s). */
+private const val WATCHDOG_MS = 60_000L
 
 private sealed interface ViewerState {
     data object Loading : ViewerState
@@ -64,21 +73,32 @@ fun ViewerScreen(repo: RoomRepository, roomId: String, captureId: String) {
 
 @Composable
 private fun SceneViewer(scenePath: String) {
+    // Each retry bumps the attempt: a fresh WebView, a fresh watchdog, stale callbacks ignored.
+    var attempt by remember(scenePath) { mutableIntStateOf(0) }
     var state by remember(scenePath) { mutableStateOf<ViewerState>(ViewerState.Loading) }
 
+    LaunchedEffect(scenePath, attempt) {
+        delay(WATCHDOG_MS)
+        // Neither onLoaded nor onError arrived (e.g. the page hung before reaching its handlers).
+        if (state == ViewerState.Loading) state = ViewerState.Failed(MSG_PAGE_FAILED)
+    }
+
     Box(Modifier.fillMaxSize().background(Color(0xFF111111))) {
-        AndroidView(
-            modifier = Modifier.fillMaxSize(),
-            factory = { context ->
-                createViewerWebView(
-                    context = context,
-                    scenePath = scenePath,
-                    onLoaded = { state = ViewerState.Loaded(it) },
-                    onError = { state = ViewerState.Failed(it) },
-                )
-            },
-            onRelease = { it.destroy() },
-        )
+        key(attempt) {
+            val mine = attempt
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { context ->
+                    createViewerWebView(
+                        context = context,
+                        scenePath = scenePath,
+                        onLoaded = { if (mine == attempt) state = ViewerState.Loaded(it) },
+                        onError = { if (mine == attempt) state = ViewerState.Failed(it) },
+                    )
+                },
+                onRelease = { it.destroy() },
+            )
+        }
         when (val s = state) {
             ViewerState.Loading -> Box(
                 Modifier.fillMaxSize().background(Color(0xFF111111)),
@@ -89,16 +109,22 @@ private fun SceneViewer(scenePath: String) {
                     Text(MSG_LOADING, color = Color.White, style = MaterialTheme.typography.bodyLarge)
                 }
             }
-            is ViewerState.Failed -> Message(s.message)
+            is ViewerState.Failed -> Message(s.message, onRetry = {
+                state = ViewerState.Loading
+                attempt++
+            })
             is ViewerState.Loaded -> Unit
         }
     }
 }
 
 @Composable
-private fun Message(text: String) {
+private fun Message(text: String, onRetry: (() -> Unit)? = null) {
     Box(Modifier.fillMaxSize().background(Color(0xFF111111)).padding(24.dp), contentAlignment = Alignment.Center) {
-        Text(text, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+        Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(16.dp)) {
+            Text(text, color = Color.White, style = MaterialTheme.typography.bodyLarge)
+            if (onRetry != null) Button(onClick = onRetry) { Text(MSG_RETRY) }
+        }
     }
 }
 

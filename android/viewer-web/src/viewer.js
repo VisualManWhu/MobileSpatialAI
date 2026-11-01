@@ -13,31 +13,56 @@
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { SparkRenderer, SplatMesh, SplatFileType } from "@sparkjsdev/spark";
-import { splatCount, robustBounds, homeView, easeInOutCubic, lerp, worldToThree } from "./scene-math.js";
+import {
+  splatCount,
+  robustBounds,
+  homeView,
+  easeInOutCubic,
+  lerp,
+  worldToThree,
+  withTimeout,
+} from "./scene-math.js";
 
 const MSG_LOAD_FAILED = "场景文件加载失败";
 const FOV = 60;
+const INIT_TIMEOUT_MS = 45000; // < the app's 60 s watchdog, so the specific error wins
 
-const renderer = new THREE.WebGLRenderer({ antialias: false });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
-renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setClearColor(0x111111, 1);
-document.body.appendChild(renderer.domElement);
+// Created in init() inside boot()'s try: a WebGL2 / wasm / worker failure must reach onError.
+let renderer = null;
+let scene = null;
+let camera = null;
+let controls = null;
 
-const scene = new THREE.Scene();
-const camera = new THREE.PerspectiveCamera(FOV, window.innerWidth / window.innerHeight, 0.01, 1000);
+function init() {
+  renderer = new THREE.WebGLRenderer({ antialias: false });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.5));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  renderer.setClearColor(0x111111, 1);
+  document.body.appendChild(renderer.domElement);
 
-// Spark re-sorts splats asynchronously after the camera moves; onDirty tells us a new frame is
-// needed once that (or a LoD update) finishes, so on-demand rendering never shows a stale sort.
-const spark = new SparkRenderer({ renderer, onDirty: () => requestRender() });
-scene.add(spark);
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(FOV, window.innerWidth / window.innerHeight, 0.01, 1000);
 
-// Touch: 1 finger rotate, 2 fingers dolly + pan (OrbitControls defaults), with damping.
-const controls = new OrbitControls(camera, renderer.domElement);
-controls.enableDamping = true;
-controls.dampingFactor = 0.1;
-controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
-controls.addEventListener("change", () => requestRender());
+  // Spark re-sorts splats asynchronously after the camera moves; onDirty tells us a new frame is
+  // needed once that (or a LoD update) finishes, so on-demand rendering never shows a stale sort.
+  const spark = new SparkRenderer({ renderer, onDirty: () => requestRender() });
+  scene.add(spark);
+
+  // Touch: 1 finger rotate, 2 fingers dolly + pan (OrbitControls defaults), with damping.
+  controls = new OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.1;
+  controls.minDistance = 0.1;
+  controls.touches = { ONE: THREE.TOUCH.ROTATE, TWO: THREE.TOUCH.DOLLY_PAN };
+  controls.addEventListener("change", () => requestRender());
+
+  window.addEventListener("resize", () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    requestRender();
+  });
+}
 
 let mesh = null;
 let home = null;
@@ -46,7 +71,7 @@ let frameQueued = false;
 
 /** Render-on-demand: one frame per request; keeps going only while damping or a flyTo is active. */
 function requestRender() {
-  if (frameQueued) return;
+  if (frameQueued || !renderer) return;
   frameQueued = true;
   requestAnimationFrame(frame);
 }
@@ -79,12 +104,6 @@ function frame(now) {
   if (active) requestRender();
 }
 
-window.addEventListener("resize", () => {
-  camera.aspect = window.innerWidth / window.innerHeight;
-  camera.updateProjectionMatrix();
-  renderer.setSize(window.innerWidth, window.innerHeight);
-  requestRender();
-});
 
 function vec(p) {
   return { x: p.x, y: p.y, z: p.z };
@@ -100,6 +119,7 @@ function cancelFlight() {
 
 /** Smoothly moves the camera to `pos` looking at `lookAt` (scene world coords) over durationMs. */
 function flyTo(pos, lookAt, durationMs = 1000) {
+  if (!camera) throw new Error("viewer not initialised");
   const to = worldToThree(pos);
   const toTarget = worldToThree(lookAt);
   cancelFlight();
@@ -125,6 +145,7 @@ function setCameraHome() {
   camera.near = home.near;
   camera.far = home.far;
   camera.updateProjectionMatrix();
+  controls.maxDistance = home.far * 0.5; // dollying can't push the scene past the far plane
   camera.position.set(home.position.x, home.position.y, home.position.z);
   controls.target.set(home.target.x, home.target.y, home.target.z);
   camera.lookAt(controls.target);
@@ -134,6 +155,7 @@ function setCameraHome() {
 
 /** Fetches and shows a .splat; resolves to the gaussian count. Replaces any previous scene. */
 async function loadScene(url) {
+  if (!renderer) throw new Error("viewer not initialised");
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
   const bytes = await res.arrayBuffer();
@@ -141,7 +163,12 @@ async function loadScene(url) {
   const bounds = robustBounds(bytes); // computed before Spark takes the buffer
 
   const next = new SplatMesh({ fileBytes: bytes, fileType: SplatFileType.SPLAT, fileName: "scene.splat" });
-  await next.initialized;
+  try {
+    await withTimeout(next.initialized, INIT_TIMEOUT_MS, "SplatMesh init timeout");
+  } catch (err) {
+    next.dispose();
+    throw err;
+  }
   if (mesh) {
     scene.remove(mesh);
     mesh.dispose();
@@ -155,19 +182,28 @@ async function loadScene(url) {
   return count;
 }
 
-function bridge() {
-  return window.Android;
+/**
+ * Reports the first outcome to the app exactly once. index.html defines window.__r3dReport (shared
+ * with its global error / unhandledrejection handlers); the fallback covers running without it.
+ */
+function report(kind, arg) {
+  if (typeof window.__r3dReport === "function") return window.__r3dReport(kind, arg);
+  const a = window.Android;
+  if (!a) return;
+  if (kind === "loaded") a.onLoaded(arg);
+  else a.onError(arg);
 }
 
 async function boot() {
   const url = new URLSearchParams(window.location.search).get("scene");
   try {
     if (!url) throw new Error("missing ?scene=");
+    init();
     const count = await loadScene(url);
-    bridge()?.onLoaded(count);
+    report("loaded", count);
   } catch (err) {
     console.error("scene load failed", err);
-    bridge()?.onError(MSG_LOAD_FAILED);
+    report("error", MSG_LOAD_FAILED);
   }
 }
 

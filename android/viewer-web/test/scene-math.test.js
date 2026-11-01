@@ -5,6 +5,9 @@ import {
   splatCount,
   robustBounds,
   homeView,
+  fitView,
+  insideBounds,
+  withTimeout,
   easeInOutCubic,
   lerp,
   worldToThree,
@@ -73,8 +76,8 @@ test("robustBounds samples large inputs without losing the range", () => {
   assert.ok(b.min[0] < 0.01 && b.max[0] > 0.99);
 });
 
-test("homeView targets the bounds center from +Z, above, and fits the sphere", () => {
-  const v = homeView({ min: [-1, -1, -1], max: [1, 1, 1] }, 60, 1);
+test("fitView targets the bounds center from +Z, above, and fits the sphere", () => {
+  const v = fitView({ min: [-1, -1, -1], max: [1, 1, 1] }, 60, 1);
   assert.deepEqual(v.target, { x: 0, y: 0, z: 0 });
   assert.ok(v.position.z > 0, "camera sits on the +Z side, looking toward -Z like ARCore's first frame");
   assert.ok(v.position.y > 0, "camera is elevated (world +Y is up)");
@@ -84,15 +87,15 @@ test("homeView targets the bounds center from +Z, above, and fits the sphere", (
   assert.ok(v.near > 0 && v.near < v.far && v.far > d + radius);
 });
 
-test("homeView uses the narrower horizontal fov in portrait", () => {
-  const wide = homeView({ min: [-1, -1, -1], max: [1, 1, 1] }, 60, 1);
-  const tall = homeView({ min: [-1, -1, -1], max: [1, 1, 1] }, 60, 0.5);
+test("fitView uses the narrower horizontal fov in portrait", () => {
+  const wide = fitView({ min: [-1, -1, -1], max: [1, 1, 1] }, 60, 1);
+  const tall = fitView({ min: [-1, -1, -1], max: [1, 1, 1] }, 60, 0.5);
   const len = (p) => Math.hypot(p.x, p.y, p.z);
   assert.ok(len(tall.position) > len(wide.position));
 });
 
-test("homeView handles a degenerate (single point) scene", () => {
-  const v = homeView({ min: [2, 3, 4], max: [2, 3, 4] }, 60, 1);
+test("fitView handles a degenerate (single point) scene", () => {
+  const v = fitView({ min: [2, 3, 4], max: [2, 3, 4] }, 60, 1);
   assert.deepEqual(v.target, { x: 2, y: 3, z: 4 });
   assert.ok(Number.isFinite(v.position.z) && v.position.z > 4);
 });
@@ -121,4 +124,49 @@ test("worldToThree is identity (splat world = ARCore world, +Y up, same as three
   assert.deepEqual(worldToThree({ x: 1, y: 2, z: 3 }), { x: 1, y: 2, z: 3 });
   assert.throws(() => worldToThree({ x: 1, y: "a", z: 3 }), /finite/);
   assert.throws(() => worldToThree(null));
+});
+
+test("insideBounds honours the 10% margin", () => {
+  const b = { min: [0, 0, 0], max: [10, 10, 10] };
+  assert.ok(insideBounds({ x: 5, y: 5, z: 5 }, b));
+  assert.ok(insideBounds({ x: -0.9, y: 5, z: 10.9 }, b, 0.1));
+  assert.ok(!insideBounds({ x: -1.1, y: 5, z: 5 }, b, 0.1));
+  assert.ok(!insideBounds({ x: 5, y: 5, z: 11.5 }, b, 0.1));
+});
+
+test("homeView: origin inside the scene -> first-frame camera at origin looking level toward -Z", () => {
+  const room = { min: [-2, -1.5, -4], max: [2, 1, 1] }; // centre z = -1.5
+  const v = homeView(room, 60, 0.5);
+  assert.deepEqual(v.position, { x: 0, y: 0, z: 0 });
+  assert.deepEqual(v.target, { x: 0, y: 0, z: -1.5 }, "level pitch, d = centre depth along -Z");
+  const reach = Math.hypot(0, -0.25, -1.5) + Math.hypot(2, 1.25, 2.5);
+  assert.ok(v.near > 0 && v.far >= reach, "far plane covers the whole room from the origin");
+});
+
+test("homeView: target depth is clamped to >= 0.5 m", () => {
+  const behind = homeView({ min: [-2, -1, -1], max: [2, 1, 3] }, 60, 1); // centre z = +1
+  assert.deepEqual(behind.target, { x: 0, y: 0, z: -0.5 });
+  const shallow = homeView({ min: [-1, -1, -0.4], max: [1, 1, 0.2] }, 60, 1);
+  assert.deepEqual(shallow.target, { x: 0, y: 0, z: -0.5 });
+});
+
+test("homeView: origin outside the (expanded) bounds -> bounds-fit view", () => {
+  const far = { min: [5, 0, -10], max: [9, 3, -6] };
+  assert.deepEqual(homeView(far, 60, 1), fitView(far, 60, 1));
+});
+
+test("withTimeout passes through results and rejections that settle in time", async () => {
+  assert.equal(await withTimeout(Promise.resolve(7), 1000), 7);
+  await assert.rejects(withTimeout(Promise.reject(new Error("boom")), 1000), /boom/);
+});
+
+test("withTimeout rejects with the given message when the promise hangs", async () => {
+  await assert.rejects(withTimeout(new Promise(() => {}), 10, "init timeout"), /init timeout/);
+});
+
+test("withTimeout clears its timer once settled", async () => {
+  const cleared = [];
+  const timers = { setTimeout: () => 42, clearTimeout: (id) => cleared.push(id) };
+  await withTimeout(Promise.resolve(1), 60000, "x", timers);
+  assert.deepEqual(cleared, [42]);
 });
