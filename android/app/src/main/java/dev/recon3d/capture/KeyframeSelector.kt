@@ -20,22 +20,22 @@ class KeyframeSelector(
     private var seenPose: FloatArray? = null
 
     fun shouldKeep(tNs: Long, poseGl: FloatArray, tracking: Boolean): Boolean {
-        if (!tracking) return false
+        if (!tracking) { seenPose = null; return false }
         val prevSeen = seenPose
         val prevSeenT = seenT
-        seenPose = poseGl; seenT = tNs
+        seenPose = poseGl.copyOf(); seenT = tNs
 
         if (prevSeen != null && tNs > prevSeenT) {
             val dtS = (tNs - prevSeenT) / 1e9
             if (rotationDeg(prevSeen, poseGl) / dtS > maxAngularVelocityDegPerS) return false
         }
         val kept = keptPose ?: return keep(tNs, poseGl)
-        if (tNs - keptT < minIntervalNs) return false
-        if (translationM(kept, poseGl) > minTranslationM || rotationDeg(kept, poseGl) > minRotationDeg) return keep(tNs, poseGl)
+        if (tNs - keptT < minIntervalNs) return false  // elapsed >= minInterval passes
+        if (translationM(kept, poseGl) >= minTranslationM || rotationDeg(kept, poseGl) >= minRotationDeg) return keep(tNs, poseGl)
         return false
     }
 
-    private fun keep(tNs: Long, p: FloatArray): Boolean { keptT = tNs; keptPose = p; return true }
+    private fun keep(tNs: Long, p: FloatArray): Boolean { keptT = tNs; keptPose = p.copyOf(); return true }
 
     companion object {
         fun translationM(a: FloatArray, b: FloatArray): Float {

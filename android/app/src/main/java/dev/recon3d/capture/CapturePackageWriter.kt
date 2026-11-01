@@ -8,6 +8,8 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import java.io.File
 import java.time.Instant
+import java.time.LocalDateTime
+import java.time.ZoneId
 import java.time.temporal.ChronoUnit
 import java.util.zip.Deflater
 import java.util.zip.ZipEntry
@@ -26,6 +28,7 @@ class CapturePackageWriter(
     private val createdAt: String = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString(),
 ) {
     private var count = 0
+    private var finished = false
     private val framesFile = File(dir, "frames.jsonl")
 
     init {
@@ -61,6 +64,8 @@ class CapturePackageWriter(
 
     /** Writes manifest.json, zips everything (fast deflate; JPEG/PNG are already compressed), deletes staging dir. */
     fun finish(): File {
+        check(!finished) { "CapturePackageWriter.finish() already called" }
+        finished = true
         val manifest: JsonObject = buildJsonObject {
             put("format_version", 1)
             put("capture_id", captureId)
@@ -76,16 +81,26 @@ class CapturePackageWriter(
         File(dir, "manifest.json").writeText(manifest.toString())
 
         val zip = File(dir.parentFile, "$captureId.zip")
-        ZipOutputStream(zip.outputStream().buffered()).use { zos ->
-            zos.setLevel(Deflater.BEST_SPEED)
-            val root = dir.toPath()
-            dir.walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach { f ->
-                zos.putNextEntry(ZipEntry(root.relativize(f.toPath()).toString().replace(File.separatorChar, '/')))
-                f.inputStream().use { it.copyTo(zos) }
-                zos.closeEntry()
+        try {
+            ZipOutputStream(zip.outputStream().buffered()).use { zos ->
+                zos.setLevel(Deflater.BEST_SPEED)
+                val root = dir.toPath()
+                dir.walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach { f ->
+                    zos.putNextEntry(ZipEntry(root.relativize(f.toPath()).toString().replace(File.separatorChar, '/')).apply { time = ZIP_ENTRY_TIME_MS })
+                    f.inputStream().use { it.copyTo(zos) }
+                    zos.closeEntry()
+                }
             }
+        } catch (e: Throwable) {
+            zip.delete(); dir.deleteRecursively()
+            throw e
         }
         dir.deleteRecursively()
         return zip
+    }
+
+    private companion object {
+        /** Fixed entry time 2026-01-01 00:00 (zone-independent DOS fields) so identical content yields identical zip bytes. */
+        val ZIP_ENTRY_TIME_MS: Long = LocalDateTime.of(2026, 1, 1, 0, 0).atZone(ZoneId.systemDefault()).toInstant().toEpochMilli()
     }
 }

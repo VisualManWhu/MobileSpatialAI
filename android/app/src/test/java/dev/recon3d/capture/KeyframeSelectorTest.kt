@@ -54,4 +54,33 @@ class KeyframeSelectorTest {
         // vs last kept (20deg): 15 deg over 0.5 s = 30 deg/s, but vs previous seen (21deg): 14 deg over 0.2 s = 70 deg/s
         assertFalse(sel.shouldKeep(1500 * ms, yaw(35f), true))
     }
+
+    @Test fun doesNotAliasCallerPoseArray() {
+        val sel = KeyframeSelector()
+        val buf = identity()
+        assertTrue(sel.shouldKeep(0, buf, true))
+        buf[12] = 5f // ARCore-style buffer reuse
+        // vs the original (x=0) this is only 0.01 m away -> must be dropped
+        assertFalse(sel.shouldKeep(1000 * ms, translate(0.01f), true))
+    }
+
+    @Test fun translationExactlyAtThresholdIsKept() {
+        val sel = KeyframeSelector(minTranslationM = 0.5f)
+        assertTrue(sel.shouldKeep(0, identity(), true))
+        assertTrue(sel.shouldKeep(1000 * ms, translate(0.5f), true))
+    }
+
+    @Test fun intervalExactlyAtThresholdIsKept() {
+        val sel = KeyframeSelector()
+        assertTrue(sel.shouldKeep(0, identity(), true))
+        assertTrue(sel.shouldKeep(200 * ms, translate(1f), true))
+    }
+
+    @Test fun firstFrameAfterTrackingLossIsVelocityExempt() {
+        val sel = KeyframeSelector()
+        assertTrue(sel.shouldKeep(0, identity(), true))
+        assertFalse(sel.shouldKeep(500 * ms, identity(), false))
+        // 90 deg in 0.1 s after the lost frame would trip the gate if seen state survived
+        assertTrue(sel.shouldKeep(600 * ms, yaw(90f), true))
+    }
 }

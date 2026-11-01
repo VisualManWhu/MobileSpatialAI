@@ -79,8 +79,8 @@ class CapturePackageWriterTest {
     /** Cross-language contract: produces the fixture consumed by server/tests/test_capture_format.py. */
     @Test fun writesSampleForServerContract() {
         // Gradle runs unit tests with cwd = android/app
-        val target = listOf("../../server/tests/fixtures", "../server/tests/fixtures").map { File(it) }
-            .firstOrNull { it.isDirectory } ?: return // server dir not present: skip gracefully
+        val target = File(System.getProperty("recon3d.fixtureDir") ?: "../../server/tests/fixtures")
+        if (!target.isDirectory) return // server dir not present: skip gracefully
         val w = CapturePackageWriter(
             File(tmp.root, "sample"), "room-android", "cap-android", 64, 48, 8, 6,
             device = "Android JVM test", createdAt = "2026-11-01T08:00:00Z",
@@ -93,7 +93,26 @@ class CapturePackageWriterTest {
             )
         }
         val zip = w.finish()
-        zip.copyTo(File(target, "android_v1.zip"), overwrite = true)
+        val dest = File(target, "android_v1.zip")
+        val bytes = zip.readBytes()
+        if (!dest.isFile || !dest.readBytes().contentEquals(bytes)) dest.writeBytes(bytes)
         assertEquals(3, entries(zip).count { it.startsWith("images/") })
+    }
+
+    @Test(expected = IllegalStateException::class) fun doubleFinishIsRejected() {
+        val w = writer()
+        w.addFrame(1, jpeg(), null, identity(), 1f, 1f, 1f, 1f)
+        w.finish()
+        w.finish()
+    }
+
+    @Test fun zipBytesAreDeterministic() {
+        fun build(sub: String): ByteArray {
+            val w = CapturePackageWriter(File(tmp.root, "$sub/stage"), "r", "c", 64, 48, 4, 3, device = "d", createdAt = "2026-11-01T08:00:00Z")
+            w.addFrame(1, jpeg(), depth(4, 3), identity(), 1f, 1f, 1f, 1f)
+            return w.finish().readBytes()
+        }
+        val a = build("a"); Thread.sleep(2100)
+        assertTrue(a.contentEquals(build("b")))
     }
 }
