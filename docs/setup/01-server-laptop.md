@@ -72,7 +72,7 @@ New-NetFirewallRule -DisplayName "Recon3D server 8765" -Direction Inbound -Proto
 注意你的 Wi-Fi 必须被 Windows 标记为"专用网络"：设置 → 网络和 Internet → WLAN → 点你的 Wi-Fi → 网络配置文件类型选"专用网络"。
 想撤销时，管理员 PowerShell 运行：`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`。
 
-### 第 3 步（续）：放行 WSL 的 Hyper-V 防火墙入站（同样由你本人执行）
+## 第 3 步（续）：放行 WSL 的 Hyper-V 防火墙入站（同样由你本人执行）
 
 镜像网络模式下，WSL 自己还有一层 "Hyper-V 防火墙"，默认会拦截手机发往 WSL 的入站连接，
 只放行上面的 Windows 规则还不够。仍在**管理员 PowerShell** 里运行：
