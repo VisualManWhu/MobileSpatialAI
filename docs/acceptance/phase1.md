@@ -1,7 +1,7 @@
 # 第一期验收
 
 依据：[设计文档](../superpowers/specs/2026-11-01-recon3d-design.md) 第 6 节"第一期"和第 7 节。
-自动化测试日期： 2026-11-01（分支 `phase1`）；手机实测 **待测**（暂时没有手机可用）。
+自动化测试日期：2026-11-01（分支 `phase1`）；手机实测 **待测**（暂时没有手机可用）。
 
 ## 1. 验收标准与测量方法
 
@@ -80,14 +80,14 @@
 - [ ] 点红色按钮，状态显示"录制中 · 已拍 N 张"；走完各阶段后点"完成拍摄"
 - 期望：Toast "已保存拍摄，可以上传了"，房间列表里该次拍摄显示"本地"和"上传"按钮
 - [ ] 取出拍摄包：`adb exec-out run-as dev.recon3d cat files/captures/<房间>/<拍摄ID>.zip > cap.zip`（文件在应用私有目录，普通 `adb pull` 读不到）
-- [ ] 在 PowerShell 里检查拍摄包（假设 `cap.zip` 放在 `D:\cap.zip`）：
+- [ ] 把上一步取出的 `cap.zip` 复制到 `D:\cap.zip`。然后从开始菜单打开 "Ubuntu" 终端（不是 PowerShell），粘贴下面这一整行检查拍摄包：
 
-```powershell
-wsl -d Ubuntu -- bash -lc "cd /mnt/d/projects/Recon3D/server && export UV_PROJECT_ENVIRONMENT=\$HOME/.venvs/recon3d && uv run python -c \"from pathlib import Path; from recon3d.capture.format import load_capture; c=load_capture(Path('/mnt/d/cap.zip'), Path('/tmp/capcheck')); print('帧数', len(c.frames), '图像', c.manifest.image_width, 'x', c.manifest.image_height)\""
-```
+  ```bash
+  cd /mnt/d/projects/Recon3D/server && UV_PROJECT_ENVIRONMENT=$HOME/.venvs/recon3d uv run python -c "from pathlib import Path; from recon3d.capture.format import load_capture; c = load_capture(Path('/mnt/d/cap.zip'), Path('/tmp/capcheck')); print('帧数', len(c.frames), '图像', c.manifest.image_width, 'x', c.manifest.image_height)"
+  ```
 
-  期望：不报错，输出形如 `帧数 120 图像 1920 x 1080`（数字以实际为准）；帧数应与 App 显示的"已拍 N 张"一致，图像长边（宽、高中较大者）>= 1280
-- 期望：图片长边 >= 1280；对着远处墙时深度 PNG 里出现 > 8191 mm 的值
+  期望：不报错，输出一行"帧数 N 图像 W x H"。仓库自带的样例包（`server/tests/fixtures/android_v1.zip`）实测输出为 `帧数 3 图像 64 x 48`，说明命令本身可用。
+  真机拍摄包的期望：帧数与 App 显示的"已拍 N 张"一致，图像长边（W、H 中较大者）>= 1280；对着远处墙时深度 PNG 里出现 > 8191 mm 的值。
 - [ ] logcat 中 `CaptureScreen: AR ready: image WxH, depth=…` 记下实际分辨率；`CapturePipeline` 的丢弃/失败计数也记下
 
 ### 6) 上传与重建流程
