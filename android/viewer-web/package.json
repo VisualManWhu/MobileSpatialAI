@@ -1,0 +1,19 @@
+{
+  "name": "recon3d-viewer-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "On-device 3DGS viewer bundled into the Android app assets (no CDN).",
+  "license": "UNLICENSED",
+  "scripts": {
+    "build": "node build.mjs",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "dependencies": {
+    "@sparkjsdev/spark": "2.4.0",
+    "three": "0.187.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

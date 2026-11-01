@@ -17,3 +17,6 @@ android/build/
 android/app/build/
 android/.idea/
 *.iml
+
+# viewer web bundle sources (built output in android/app/src/main/assets/viewer is committed)
+android/viewer-web/node_modules/

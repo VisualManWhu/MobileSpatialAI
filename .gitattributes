@@ -4,3 +4,5 @@
 *.jpg binary
 *.bat text eol=crlf
 *.jar binary
+# generated bundle (npm run build in android/viewer-web): no text diffs
+android/app/src/main/assets/viewer/viewer.js -diff linguist-generated
