@@ -2,12 +2,18 @@
 name = "recon3d"
 version = "0.1.0"
 description = "Recon3D server: phone capture to 3D Gaussian Splatting reconstruction"
-requires-python = ">=3.11,<3.12"
+# gsplat publishes prebuilt (no-nvcc) wheels for cp310 only, hence Python 3.10.
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "pydantic>=2.5",
     "numpy>=1.26",
     "pillow>=10.0",
     "torch==2.4.1",
+    "scipy>=1.11",  # cKDTree for Gaussian scale init
+    # Prebuilt CUDA wheel from the gsplat index; Linux only (see [tool.uv.sources]).
+    "gsplat==1.5.3; sys_platform == 'linux'",
+    # gsplat's loader imports torch.utils.cpp_extension, which imports setuptools.
+    "setuptools; sys_platform == 'linux'",
 ]
 
 [dependency-groups]
@@ -23,12 +29,21 @@ packages = ["recon3d"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+markers = [
+    "gpu: needs a CUDA GPU (auto-skipped when torch.cuda.is_available() is False)",
+]
 
-# torch 2.4.x + CUDA 12.4 matches the gsplat 1.5.0 "pt24cu124" prebuilt wheel tag.
+# torch 2.4.x + CUDA 12.4 matches the gsplat "pt24cu124" prebuilt wheel tag.
 [[tool.uv.index]]
 name = "pytorch-cu124"
 url = "https://download.pytorch.org/whl/cu124"
 explicit = true
 
+[[tool.uv.index]]
+name = "gsplat-pt24cu124"
+url = "https://docs.gsplat.studio/whl/pt24cu124"
+explicit = true
+
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
+gsplat = [{ index = "gsplat-pt24cu124", marker = "sys_platform == 'linux'" }]
