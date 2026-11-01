@@ -1,0 +1,114 @@
+"""On-disk job store: <data_dir>/jobs/<job_id>/{capture.zip, status.json, scene.splat, scene.ply, log.txt}."""
+from __future__ import annotations
+
+import json
+import os
+import queue
+import re
+import shutil
+import tempfile
+import threading
+import time
+import uuid
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import BinaryIO
+
+DEFAULT_MAX_UPLOAD_BYTES = 4 * 1024**3
+CHUNK = 1024 * 1024
+ACTIVE_STATES = ("queued", "training", "exporting")
+RESTART_MESSAGE = "服务重启，任务中断，请重新上传"
+_JOB_ID = re.compile(r"[0-9a-f]{12}")
+
+
+class UploadTooLargeError(Exception):
+    def __init__(self, max_bytes: int):
+        super().__init__(f"upload exceeds {max_bytes} bytes")
+        self.max_bytes = max_bytes
+
+
+@dataclass(frozen=True)
+class JobStatus:
+    job_id: str
+    state: str
+    progress: float
+    message: str
+    created_at: float
+
+
+class JobStore:
+    def __init__(self, data_dir: Path, max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES):
+        self.data_dir = Path(data_dir)
+        self.jobs_dir = self.data_dir / "jobs"
+        self.jobs_dir.mkdir(parents=True, exist_ok=True)
+        self.max_upload_bytes = max_upload_bytes
+        self.queue: queue.Queue[str] = queue.Queue()  # ids of jobs created by this process
+        self._lock = threading.Lock()
+
+    def job_dir(self, job_id: str) -> Path:
+        return self.jobs_dir / job_id
+
+    def create(self, stream: BinaryIO) -> str:
+        """Stream the upload to disk in chunks, then enqueue. Raises UploadTooLargeError."""
+        job_id = uuid.uuid4().hex[:12]
+        d = self.job_dir(job_id)
+        d.mkdir()
+        try:
+            written = 0
+            with open(d / "capture.zip", "wb") as f:
+                while chunk := stream.read(CHUNK):
+                    written += len(chunk)
+                    if written > self.max_upload_bytes:
+                        raise UploadTooLargeError(self.max_upload_bytes)
+                    f.write(chunk)
+        except BaseException:
+            shutil.rmtree(d, ignore_errors=True)
+            raise
+        status = JobStatus(job_id, "queued", 0.0, "排队中", time.time())
+        self._write(status)
+        self.log(job_id, f"created ({written} bytes), state=queued")
+        self.queue.put(job_id)
+        return job_id
+
+    def get(self, job_id: str) -> JobStatus | None:
+        if not _JOB_ID.fullmatch(job_id):
+            return None
+        try:
+            raw = json.loads((self.job_dir(job_id) / "status.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        return JobStatus(**raw)
+
+    def update(self, job_id: str, **fields) -> JobStatus:
+        with self._lock:
+            old = self.get(job_id)
+            if old is None:
+                raise KeyError(job_id)
+            new = JobStatus(**{**asdict(old), **fields})
+            self._write(new)
+        if new.state != old.state:
+            self.log(job_id, f"state={new.state} message={new.message}")
+        return new
+
+    def recover_after_restart(self) -> None:
+        """Jobs left active by a previous process can never finish; mark them failed."""
+        for d in sorted(self.jobs_dir.iterdir()):
+            s = self.get(d.name)
+            if s is not None and s.state in ACTIVE_STATES:
+                self.update(s.job_id, state="failed", message=RESTART_MESSAGE)
+
+    def log(self, job_id: str, text: str) -> None:
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S")
+        with open(self.job_dir(job_id) / "log.txt", "a", encoding="utf-8") as f:
+            f.write(f"[{stamp}] {text}\n")
+
+    def _write(self, status: JobStatus) -> None:
+        d = self.job_dir(status.job_id)
+        fd, tmp = tempfile.mkstemp(dir=d, prefix=".status-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(asdict(status), f, ensure_ascii=False)
+            os.replace(tmp, d / "status.json")
+        except BaseException:
+            Path(tmp).unlink(missing_ok=True)
+            raise

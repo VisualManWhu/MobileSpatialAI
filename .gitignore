@@ -4,3 +4,7 @@ __pycache__/
 .venv/
 *.egg-info/
 .pytest_cache/
+
+# recon3d-server default --data-dir (./data)
+/data/
+/server/data/

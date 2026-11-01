@@ -14,10 +14,19 @@ dependencies = [
     "gsplat==1.5.3; sys_platform == 'linux'",
     # gsplat's loader imports torch.utils.cpp_extension, which imports setuptools.
     "setuptools; sys_platform == 'linux'",
+    "fastapi>=0.162.0",
+    "uvicorn[standard]>=0.54.0",
+    "python-multipart>=0.0.32",
 ]
 
+[project.scripts]
+recon3d-server = "recon3d.main:cli"
+
 [dependency-groups]
-dev = ["pytest>=8.0"]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=8.0",
+]
 
 [build-system]
 requires = ["hatchling"]
@@ -29,6 +38,10 @@ packages = ["recon3d"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+filterwarnings = [
+    # starlette 1.x nudges toward the httpx2 fork; httpx works fine for TestClient.
+    "ignore:Using `httpx` with `starlette.testclient` is deprecated",
+]
 markers = [
     "gpu: needs a CUDA GPU (auto-skipped when torch.cuda.is_available() is False)",
 ]
