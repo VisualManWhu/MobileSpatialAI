@@ -1,0 +1,24 @@
+[project]
+name = "recon3d"
+version = "0.1.0"
+description = "Recon3D server: phone capture to 3D Gaussian Splatting reconstruction"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "pydantic>=2.5",
+    "numpy>=1.26",
+    "pillow>=10.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["recon3d"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
