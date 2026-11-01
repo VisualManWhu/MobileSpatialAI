@@ -8,3 +8,12 @@ __pycache__/
 # recon3d-server default --data-dir (./data)
 /data/
 /server/data/
+
+# Android / Gradle
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/build/
+android/app/build/
+android/.idea/
+*.iml

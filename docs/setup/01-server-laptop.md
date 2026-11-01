@@ -137,3 +137,35 @@ bash server/scripts/run.sh
 - Windows 版本是否 22H2 及以上、`wsl --version` 是否正常（见第 2 步前提）？
 - 服务窗口是否还在运行？
 - 先在笔记本自己的浏览器打开 `http://localhost:8765/api/v1/health`，能打开说明服务本身正常，问题在网络。
+
+## Tailscale 方式（推荐；不要求同一个 Wi-Fi）
+
+Tailscale 会在手机和笔记本之间建一条加密的虚拟局域网，两边不在同一个 Wi-Fi（甚至一个用流量）也能互连，
+也绕开了 "AP 隔离" 的问题。上面的同一 Wi-Fi 方式仍然可用，二选一即可。
+
+1. **笔记本（Windows）**：打开 https://tailscale.com/download 下载 Windows 版并安装，登录一个账号。
+2. **手机**：在 Google Play 安装 "Tailscale"，用**同一个账号**登录，按提示允许建立 VPN。
+3. **WSL 里不用装 Tailscale**：第 2 步的镜像网络模式下，WSL 直接共用 Windows 的 Tailscale 网卡。
+4. **防火墙规则改用 `-Profile Any`**：Windows 通常把 Tailscale 网卡归为"公用网络"，第 3 步的 `-Profile Private` 规则对它不生效。
+   在**管理员 PowerShell** 里（由你本人执行）：
+   - 还没建过第 3 步的规则：
+     ```powershell
+     New-NetFirewallRule -DisplayName "Recon3D server 8765" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Any
+     ```
+   - 已经建过：
+     ```powershell
+     Set-NetFirewallRule -DisplayName "Recon3D server 8765" -Profile Any
+     ```
+   撤销方法与第 3 步相同：`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`。
+5. **第 3 步（续）的 Hyper-V 入站设置不变**，照常执行一次即可。
+6. **查笔记本的 Tailscale 地址**：PowerShell 运行
+
+   ```powershell
+   tailscale ip -4
+   ```
+
+   会输出一个 `100.` 开头的地址，例如 `100.101.102.103`。
+7. 手机浏览器打开 `http://100.101.102.103:8765/api/v1/health`（换成你的地址），看到 health JSON 即成功。
+   在 App 的设置页里填 `100.101.102.103:8765` 即可（见 03-phone.md）。
+
+连不上时：两边 Tailscale App 是否都显示 "Connected"、是否同一账号；在笔记本上 `tailscale status` 能否看到手机；其余同上面的"打不开怎么办"。
