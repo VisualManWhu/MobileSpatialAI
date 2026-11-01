@@ -7,7 +7,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.Button
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,7 +33,6 @@ fun SettingsScreen(
     settings: ServerSettings,
     apiFor: (String) -> Api,
     modifier: Modifier = Modifier,
-    onOpenCapture: (() -> Unit)? = null,
 ) {
     var address by rememberSaveable { mutableStateOf("") }
     var result by remember { mutableStateOf<String?>(null) }
@@ -54,7 +52,7 @@ fun SettingsScreen(
             value = address,
             onValueChange = { address = it },
             label = { Text("计算端地址") },
-            placeholder = { Text("例如 192.168.1.20:8765 或 100.x.x.x:8765") },
+            placeholder = { Text("例如 192.168.1.20 或 100.x.x.x（默认端口 8765）") },
             singleLine = true,
             keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Done),
             modifier = Modifier.fillMaxWidth(),
@@ -83,8 +81,6 @@ fun SettingsScreen(
             },
         ) { Text("测试连接") }
         result?.let { Text(it, style = MaterialTheme.typography.bodyLarge) }
-        // TEMP until Task 12 adds the rooms list.
-        onOpenCapture?.let { OutlinedButton(onClick = it) { Text("（临时）开始拍摄") } }
     }
 }
 

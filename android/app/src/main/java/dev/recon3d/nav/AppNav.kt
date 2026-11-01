@@ -1,43 +1,96 @@
 package dev.recon3d.nav
 
 import android.widget.Toast
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
+import dev.recon3d.AppGraph
+import dev.recon3d.MSG_NO_SERVER
 import dev.recon3d.capture.CaptureScreen
-import dev.recon3d.net.Api
-import dev.recon3d.settings.ServerSettings
+import dev.recon3d.rooms.CaptureRecord
+import dev.recon3d.rooms.RoomListScreen
+import dev.recon3d.rooms.RoomScreen
 import dev.recon3d.settings.SettingsScreen
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 
 object Routes {
+    const val ROOMS = "rooms"
+    const val ROOM = "room/{roomId}"
     const val SETTINGS = "settings"
     const val CAPTURE = "capture/{roomId}"
+    const val VIEWER = "viewer/{roomId}/{captureId}"
+    fun room(roomId: String) = "room/$roomId"
     fun capture(roomId: String) = "capture/$roomId"
+    fun viewer(roomId: String, captureId: String) = "viewer/$roomId/$captureId"
 }
 
-/** App navigation graph: settings + AR capture (rooms list: Task 12). */
+/** App navigation graph: rooms (start) → room → capture / viewer; gear → settings. */
 @Composable
-fun AppNav(
-    settings: ServerSettings,
-    apiFor: (String) -> Api,
-    modifier: Modifier = Modifier,
-) {
+fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
     val nav = rememberNavController()
     val context = LocalContext.current
-    NavHost(navController = nav, startDestination = Routes.SETTINGS, modifier = modifier) {
+    val scope = rememberCoroutineScope()
+
+    /** Runs [action] only if a server address is saved; otherwise asks for one in settings. */
+    fun withServer(action: () -> Unit) {
+        scope.launch {
+            if (graph.settings.baseUrl.first() == null) {
+                Toast.makeText(context, MSG_NO_SERVER, Toast.LENGTH_LONG).show()
+                nav.navigate(Routes.SETTINGS)
+            } else {
+                action()
+            }
+        }
+    }
+
+    NavHost(navController = nav, startDestination = Routes.ROOMS, modifier = modifier) {
+        composable(Routes.ROOMS) {
+            RoomListScreen(
+                repo = graph.rooms,
+                onOpenRoom = { nav.navigate(Routes.room(it)) },
+                onOpenSettings = { nav.navigate(Routes.SETTINGS) },
+            )
+        }
+        composable(Routes.ROOM) { entry ->
+            val roomId = entry.arguments?.getString("roomId") ?: return@composable
+            RoomScreen(
+                repo = graph.rooms,
+                roomId = roomId,
+                onCapture = { nav.navigate(Routes.capture(roomId)) },
+                onUpload = { id -> withServer { graph.uploader.start(roomId, id) } },
+                onRetry = { id -> withServer { graph.uploader.retry(roomId, id) } },
+                onView = { id -> nav.navigate(Routes.viewer(roomId, id)) },
+                onBack = { nav.popBackStack() },
+            )
+        }
         composable(Routes.SETTINGS) {
-            // TEMP (Task 12 replaces this with the rooms list): entry point to the capture screen.
-            SettingsScreen(settings = settings, apiFor = apiFor, onOpenCapture = { nav.navigate(Routes.capture("room-test")) })
+            SettingsScreen(settings = graph.settings, apiFor = graph::apiFor)
         }
         composable(Routes.CAPTURE) { entry ->
             val roomId = entry.arguments?.getString("roomId") ?: return@composable
             CaptureScreen(roomId = roomId, onFinished = { zip ->
-                Toast.makeText(context, "已保存：${zip.name}", Toast.LENGTH_LONG).show()
-                nav.popBackStack()
+                graph.rooms.addCapture(roomId, CaptureRecord(id = zip.nameWithoutExtension, zipPath = zip.path))
+                Toast.makeText(context, "已保存拍摄，可以上传了", Toast.LENGTH_LONG).show()
+                nav.popBackStack() // back to the room
             })
+        }
+        composable(Routes.VIEWER) {
+            // Task 13 implements the 3D viewer.
+            Box(Modifier.fillMaxSize().padding(24.dp), contentAlignment = Alignment.Center) {
+                Text("查看器将在下一步实现", style = MaterialTheme.typography.bodyLarge)
+            }
         }
     }
 }

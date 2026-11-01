@@ -30,14 +30,24 @@ class ServerSettings(context: Context) {
     }
 }
 
+/** Port the compute server listens on by default. */
+const val DEFAULT_SERVER_PORT = 8765
+
 /**
  * Turns what a user types into a base URL: trims, adds `http://` when there is no scheme,
- * drops trailing slashes. Any host form is accepted — LAN IPs (`192.168.1.20:8765`),
- * Tailscale IPs (`100.101.102.103:8765`), host names.
+ * adds `:8765` when the host has no port (also for `https://`), drops trailing slashes.
+ * Any host form is accepted — LAN IPs (`192.168.1.20`), Tailscale IPs (`100.101.102.103:8765`),
+ * host names, bracketed IPv6.
  */
 fun normalizeBaseUrl(input: String): String {
     var s = input.trim()
     require(s.isNotEmpty()) { "server address is blank" }
     if (!s.contains("://")) s = "http://$s"
-    return s.trimEnd('/')
+    s = s.trimEnd('/')
+    val authStart = s.indexOf("://") + 3
+    val authEnd = s.indexOfAny(charArrayOf('/', '?', '#'), authStart).let { if (it < 0) s.length else it }
+    val hostPort = s.substring(authStart, authEnd).substringAfterLast('@')
+    val hasPort = if (hostPort.startsWith("[")) hostPort.contains("]:") else hostPort.contains(':')
+    if (hasPort || hostPort.isEmpty()) return s
+    return s.substring(0, authEnd) + ":$DEFAULT_SERVER_PORT" + s.substring(authEnd)
 }

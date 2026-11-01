@@ -20,8 +20,21 @@ class ServerSettingsTest {
 
     @Test fun keepsExistingScheme() {
         assertEquals("http://laptop.local:8765", normalizeBaseUrl("http://laptop.local:8765/"))
-        assertEquals("https://example.org", normalizeBaseUrl("https://example.org"))
         assertEquals("HTTP://10.0.0.2:8765", normalizeBaseUrl("HTTP://10.0.0.2:8765"))
+    }
+
+    @Test fun defaultsPortWhenMissing() {
+        assertEquals("http://192.168.1.20:8765", normalizeBaseUrl("192.168.1.20"))
+        assertEquals("http://100.101.102.103:8765", normalizeBaseUrl("100.101.102.103/"))
+        assertEquals("https://example.org:8765", normalizeBaseUrl("https://example.org"))
+        assertEquals("http://laptop.local:8765/base", normalizeBaseUrl("laptop.local/base"))
+        assertEquals("http://[fd7a::1]:8765", normalizeBaseUrl("http://[fd7a::1]"))
+    }
+
+    @Test fun keepsExplicitPort() {
+        assertEquals("http://192.168.1.20:9000", normalizeBaseUrl("192.168.1.20:9000"))
+        assertEquals("https://example.org:443", normalizeBaseUrl("https://example.org:443"))
+        assertEquals("http://[fd7a::1]:9000", normalizeBaseUrl("[fd7a::1]:9000"))
     }
 
     @Test fun rejectsBlank() {
