@@ -1,0 +1,91 @@
+package dev.recon3d.capture
+
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import java.io.File
+import java.time.Instant
+import java.time.temporal.ChronoUnit
+import java.util.zip.Deflater
+import java.util.zip.ZipEntry
+import java.util.zip.ZipOutputStream
+
+/** Writes a capture package (docs/capture-format.md, format v1). Frames are staged in [dir], then zipped by [finish]. */
+class CapturePackageWriter(
+    private val dir: File,
+    private val roomId: String,
+    private val captureId: String,
+    private val imageW: Int,
+    private val imageH: Int,
+    private val depthW: Int?,
+    private val depthH: Int?,
+    private val device: String,
+    private val createdAt: String = Instant.now().truncatedTo(ChronoUnit.SECONDS).toString(),
+) {
+    private var count = 0
+    private val framesFile = File(dir, "frames.jsonl")
+
+    init {
+        File(dir, "images").mkdirs(); File(dir, "depth").mkdirs()
+        framesFile.writeText("")
+    }
+
+    fun addFrame(
+        tNs: Long, jpeg: ByteArray, depthMm: ShortArray?, poseGl: FloatArray,
+        fx: Float, fy: Float, cx: Float, cy: Float,
+    ) {
+        require(poseGl.size == 16) { "pose must have 16 floats" }
+        val index = ++count
+        val name = "%06d".format(index)
+        val imageRel = "images/$name.jpg"
+        File(dir, imageRel).writeBytes(jpeg)
+        var depthRel: String? = null
+        if (depthMm != null) {
+            require(depthW != null && depthH != null) { "depth given but depth size not configured" }
+            depthRel = "depth/$name.png"
+            File(dir, depthRel).writeBytes(Png16.encode(depthW, depthH, depthMm))
+        }
+        val line = buildJsonObject {
+            put("index", index)
+            put("t_ns", tNs)
+            put("image", imageRel)
+            put("depth", depthRel?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("pose", JsonArray(poseGl.map { JsonPrimitive(it) }))
+            put("fx", fx); put("fy", fy); put("cx", cx); put("cy", cy)
+        }
+        framesFile.appendText(line.toString() + "\n")
+    }
+
+    /** Writes manifest.json, zips everything (fast deflate; JPEG/PNG are already compressed), deletes staging dir. */
+    fun finish(): File {
+        val manifest: JsonObject = buildJsonObject {
+            put("format_version", 1)
+            put("capture_id", captureId)
+            put("room_id", roomId)
+            put("kind", "model")
+            put("device", device)
+            put("created_at", createdAt)
+            put("image_width", imageW); put("image_height", imageH)
+            put("depth_width", depthW?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("depth_height", depthH?.let { JsonPrimitive(it) } ?: JsonNull)
+            put("frame_count", count)
+        }
+        File(dir, "manifest.json").writeText(manifest.toString())
+
+        val zip = File(dir.parentFile, "$captureId.zip")
+        ZipOutputStream(zip.outputStream().buffered()).use { zos ->
+            zos.setLevel(Deflater.BEST_SPEED)
+            val root = dir.toPath()
+            dir.walkTopDown().filter { it.isFile }.sortedBy { it.path }.forEach { f ->
+                zos.putNextEntry(ZipEntry(root.relativize(f.toPath()).toString().replace(File.separatorChar, '/')))
+                f.inputStream().use { it.copyTo(zos) }
+                zos.closeEntry()
+            }
+        }
+        dir.deleteRecursively()
+        return zip
+    }
+}

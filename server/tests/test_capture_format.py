@@ -66,3 +66,16 @@ def test_rejects_non_object_frame_line(tmp_path, bad):
     z = _rewrite_frames(make_capture(tmp_path), lambda lines: [bad] + lines[1:])
     with pytest.raises(CaptureFormatError, match="frames.jsonl 格式错误"):
         load_capture(z, tmp_path / "w")
+
+
+def test_loads_android_package(tmp_path):
+    """Cross-language contract: package written by the Android CapturePackageWriter (JUnit generates it)."""
+    from pathlib import Path
+
+    cap = load_capture(Path(__file__).parent / "fixtures" / "android_v1.zip", tmp_path / "w")
+    assert cap.manifest.format_version == 1
+    assert len(cap.frames) == 3
+    assert cap.frames[1].pose.shape == (4, 4)
+    assert abs(cap.frames[1].pose[0, 3] - 0.1) < 1e-6  # translation survives column-major round trip
+    assert all(f.depth is not None for f in cap.frames)
+    assert cap.manifest.depth_width == 8
