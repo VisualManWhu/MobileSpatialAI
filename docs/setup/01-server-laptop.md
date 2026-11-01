@@ -41,6 +41,11 @@ nvidia-smi
 
 默认情况下 WSL 在一个虚拟网络里，手机连不上。"镜像网络模式"会让 WSL 和 Windows 共用同一个 IP。
 
+前提：需要 **Windows 11 22H2 或更新版本**，且 WSL 版本够新。检查方法：
+
+- 按 `Win+R` 输入 `winver` 回车，看版本号是否为 22H2 及以上。
+- 在 PowerShell 运行 `wsl --version`，能显示版本号即可；若报错或版本很旧，先运行 `wsl --update` 升级。
+
 1. 在 PowerShell 运行 `notepad $env:UserProfile\.wslconfig`（文件不存在时会提示新建，选"是"）。
 2. **检查**里面是否已有下面两行；没有就**补上**（已有则不用改）：
 
@@ -66,6 +71,24 @@ New-NetFirewallRule -DisplayName "Recon3D server 8765" -Direction Inbound -Proto
 含义：新增一条"入站规则"，只允许 TCP 8765 端口、只在"专用网络"下生效（家里 / 实验室确认过的 Wi-Fi）。
 注意你的 Wi-Fi 必须被 Windows 标记为"专用网络"：设置 → 网络和 Internet → WLAN → 点你的 Wi-Fi → 网络配置文件类型选"专用网络"。
 想撤销时，管理员 PowerShell 运行：`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`。
+
+### 第 3 步（续）：放行 WSL 的 Hyper-V 防火墙入站（同样由你本人执行）
+
+镜像网络模式下，WSL 自己还有一层 "Hyper-V 防火墙"，默认会拦截手机发往 WSL 的入站连接，
+只放行上面的 Windows 规则还不够。仍在**管理员 PowerShell** 里运行：
+
+```powershell
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+```
+
+说明：`{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}` 是 WSL 的 Hyper-V 防火墙配置的固定标识；
+`-DefaultInboundAction Allow` 表示允许入站连接进入 WSL。
+可用 `Get-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'` 查看，`DefaultInboundAction` 显示 `Allow` 即已生效。
+想撤销（恢复默认拦截），管理员 PowerShell 运行：
+
+```powershell
+Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction NotConfigured
+```
 
 ## 第 4 步：安装服务端
 
@@ -110,5 +133,7 @@ bash server/scripts/run.sh
 - 手机和笔记本是不是同一个 Wi-Fi？有些 Wi-Fi 开了"AP 隔离/客户端隔离"（学校、实验室常见），设备之间互相访问不了，可换用手机热点让笔记本连接。
 - 第 3 步的防火墙规则是否已创建？Wi-Fi 是否是"专用网络"？
 - 第 2 步 `.wslconfig` 是否生效？改完需 `wsl --shutdown` 后重开 Ubuntu。
+- 第 3 步（续）的 Hyper-V 入站设置是否已执行？这是手机连不上的常见原因：用上面的 `Get-NetFirewallHyperVVMSetting` 命令检查 `DefaultInboundAction` 是否为 `Allow`。
+- Windows 版本是否 22H2 及以上、`wsl --version` 是否正常（见第 2 步前提）？
 - 服务窗口是否还在运行？
 - 先在笔记本自己的浏览器打开 `http://localhost:8765/api/v1/health`，能打开说明服务本身正常，问题在网络。

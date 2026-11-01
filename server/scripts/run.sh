@@ -8,6 +8,7 @@ cd "$SERVER_DIR"
 
 # 与 install.sh 相同：虚拟环境放在家目录（避免 /mnt/d 慢），可用环境变量覆盖。
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$HOME/.venvs/recon3d}"
+export UV_LINK_MODE=copy  # venv 在 ext4、项目在 /mnt/d，硬链接不可用，避免警告
 export PATH="$HOME/.local/bin:$PATH"
 command -v uv >/dev/null 2>&1 || { echo "未找到 uv，请先运行：bash server/scripts/install.sh" >&2; exit 1; }
 

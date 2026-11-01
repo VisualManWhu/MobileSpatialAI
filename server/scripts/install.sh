@@ -8,6 +8,10 @@ cd "$SERVER_DIR"
 # 虚拟环境放在 Linux 家目录而不是 /mnt/d 下：WSL 访问 Windows 磁盘很慢，
 # 把几个 GB 的 torch 放在那里会让安装和启动都慢很多。可用环境变量覆盖。
 export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-$HOME/.venvs/recon3d}"
+# 虚拟环境(ext4)与项目缓存/源码(/mnt/d)不在同一文件系统，硬链接会失败并刷屏警告，直接用复制。
+export UV_LINK_MODE=copy
+# 禁止从源码编译 gsplat（需要 nvcc）；预编译包拿不到时直接报错，而不是悄悄走编译。
+export UV_NO_BUILD_PACKAGE=gsplat
 
 fail() { echo; echo "[失败] $*" >&2; exit 1; }
 
@@ -27,7 +31,9 @@ echo "==> 2/4 准备 Python 3.10（gsplat 预编译包只支持 3.10）"
 uv python install 3.10 || fail "Python 3.10 安装失败，请检查网络。"
 
 echo "==> 3/4 安装依赖（首次约 3 GB，需要几分钟；无需安装 CUDA 工具包）"
-uv sync || fail "依赖安装失败，请检查网络后重试（可重复运行本脚本）。"
+uv sync || fail "依赖安装失败。请检查网络后重试（可重复运行本脚本）。
+若提示 gsplat 相关错误：gsplat 预编译包下载失败（检查网络 / docs.gsplat.studio 是否可访问），
+脚本不会改为从源码编译（那需要 CUDA 工具包 nvcc）。"
 
 echo "==> 4/4 检查 GPU 是否可用"
 if ! uv run python -c "import torch, gsplat; assert torch.cuda.is_available()"; then
