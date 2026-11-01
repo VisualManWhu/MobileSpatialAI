@@ -21,10 +21,12 @@
 
 | 套件 | 命令 | 结果 |
 |------|------|------|
-| 服务端（WSL，含 GPU 测试） | `cd server && UV_PROJECT_ENVIRONMENT=$HOME/.venvs/recon3d uv run pytest -q` | 65 passed in 77.03s |
-| Android 单元测试 | `.\gradlew.bat :app:testDebugUnitTest` | BUILD SUCCESSFUL；105 个测试，0 失败 |
+| 服务端（WSL，含 GPU 测试） | `cd server && UV_PROJECT_ENVIRONMENT=$HOME/.venvs/recon3d uv run pytest -q -rs` | 70 passed in 78.30s（最终修复轮后） |
+| Android 单元测试 | `.\gradlew.bat :app:testDebugUnitTest` | BUILD SUCCESSFUL；113 个测试，0 失败（最终修复轮后） |
 | Android 调试包 | `.\gradlew.bat :app:assembleDebug` | BUILD SUCCESSFUL；`android/app/build/outputs/apk/debug/app-debug.apk`（约 35 MB） |
 | 查看器网页 | `cd android/viewer-web && npm test` | 23 passed，0 failed |
+
+若服务端测试输出里看到 `skipped`，说明 CUDA 不可用、GPU 测试被跳过，**不算通过**。
 
 ### 合成数据 GPU 训练耗时
 
@@ -46,9 +48,10 @@
 详细步骤和命令见 [docs/setup/01-server-laptop.md](../setup/01-server-laptop.md)，这里只列要点：
 
 - [ ] 网络二选一：Wi-Fi 标记为"专用网络"，或使用 Tailscale
-- [ ] 防火墙放行 8765：Wi-Fi 方式用 `-Profile Private`；Tailscale 方式用 `-Profile Any`
-- [ ] Hyper-V 入站放行：`Set-NetFirewallHyperVVMSetting ... -DefaultInboundAction Allow`
-- 期望：`Get-NetFirewallHyperVVMSetting` 显示 `DefaultInboundAction` 为 `Allow`
+- [ ] 防火墙放行 8765：Wi-Fi 方式用 `New-NetFirewallRule ... -Profile Private`；Tailscale 方式用 `-Profile Any -RemoteAddress 100.64.0.0/10`（只允许 Tailscale 设备）
+- [ ] Hyper-V 入站只放行 8765 端口：Wi-Fi 方式 `New-NetFirewallHyperVRule -Name Recon3D8765 ... -LocalPorts 8765`；Tailscale 方式 `-Name Recon3D8765TS ... -RemoteAddresses 100.64.0.0/10`（**不要**用整台 WSL 放行的 `Set-NetFirewallHyperVVMSetting ... -DefaultInboundAction Allow`）
+- 期望：`Get-NetFirewallHyperVRule -Name Recon3D8765`（或 `Recon3D8765TS`）显示 `LocalPorts : 8765`、`Action : Allow`
+- 撤销：`Remove-NetFirewallHyperVRule -Name Recon3D8765`；`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`（Tailscale 规则名为 `"Recon3D server 8765 Tailscale"`）
 
 ### 2) 手机浏览器检查服务端
 
@@ -89,19 +92,24 @@
   期望：不报错，输出一行"帧数 N 图像 W x H"。仓库自带的样例包（`server/tests/fixtures/android_v1.zip`）实测输出为 `帧数 3 图像 64 x 48`，说明命令本身可用。
   真机拍摄包的期望：帧数与 App 显示的"已拍 N 张"一致，图像长边（W、H 中较大者）>= 1280；对着远处墙时深度 PNG 里出现 > 8191 mm 的值。
 - [ ] logcat 中 `CaptureScreen: AR ready: image WxH, depth=…` 记下实际分辨率；`CapturePipeline` 的丢弃/失败计数也记下
+- [ ] logcat 中 `CaptureRenderer: intrinsics: …`（每次拍摄一行）记下：CPU 图像尺寸、CPU 内参（imageIntrinsics 的尺寸与 f、c）、纹理内参（textureIntrinsics 的尺寸与 f、c）、深度图尺寸与写入的 depth k。
+  若纹理与 CPU 图像宽高比不同，说明深度内参确实需要单独记录（拍摄包里每帧的 `depth_fx/fy/cx/cy`）
+- [ ] 故意拍一次没有深度的：在很暗的房间里拍，或用手指挡住机背的深度/ToF 传感器（若有）。等 10 秒后若仍无深度，录制时应出现黄色提示"未获取到深度，本次拍摄将不含深度（重建质量可能下降）"，logcat 有 `depth never became available` 警告。
+  上传重建后判断结果是否还能用（记"可用 / 勉强 / 不可用"）
 
 ### 6) 上传与重建流程
 
 - [ ] 点"上传"，依次看到：上传中 x%（带进度条）、排队中、训练中 x%、导出中 / 正在下载模型…、完成
 - 期望：出现"查看 3D"按钮；`files/rooms/<房间ID>/<拍摄ID>/scene.splat` 已存在
 - [ ] 上传中途开飞行模式：显示"失败：…"（原因文字以 App 实际为准），拍摄包保留，点"重新上传"能重传
+- [ ] 训练中短暂断网（开飞行模式约 20 秒再关）：状态显示"网络暂时不可用，正在重试 (n/10)"，恢复网络后继续显示训练进度并最终完成，不需要重新上传
 - [ ] 上传中途关掉服务端：显示"失败：连不上计算端，请检查 Wi-Fi 和地址"，点"重新上传"能重传
 - [ ] 训练中关服务端再重启：显示"失败：服务重启，任务中断，请重新上传"，点"重新上传"能重传；训练中杀掉 App 再打开，轮询应自动恢复
 
 ### 7) 查看器
 
 - [ ] 点"查看 3D"：先出现"正在加载场景…"，随后消失，场景渲染出来
-- [ ] 方向正确：地板在下、天花板在上
+- [ ] 方向正确：地板在下、天花板在上（务必确认；若地板在上，记为问题，见第 3 节）
 - [ ] 初始视角：在拍摄起点附近、朝向 -Z 平视，转动时绕前方某点旋转，看起来合理（记下是否需要调整）
 - [ ] 单指旋转、双指缩放和平移顺滑，阻尼自然，无明显卡顿
 - [ ] 用调试包连电脑，Chrome 打开 `chrome://inspect`，在控制台运行 `flyTo({x:0,y:1.5,z:2},{x:0,y:1,z:0},1500)`：镜头平滑缓动飞过去；`setCameraHome()` 回到初始视角

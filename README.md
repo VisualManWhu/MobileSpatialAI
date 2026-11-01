@@ -32,8 +32,10 @@
 服务端（在 WSL Ubuntu 中，含 GPU 测试，约 80 秒）：
 
 ```
-cd server && UV_PROJECT_ENVIRONMENT=$HOME/.venvs/recon3d uv run pytest -q
+cd server && UV_PROJECT_ENVIRONMENT=$HOME/.venvs/recon3d uv run pytest -q -rs
 ```
+
+若输出里看到 `skipped`，说明 CUDA 不可用、GPU 测试被跳过，**不算通过**（`-rs` 会列出被跳过的测试和原因）。
 
 Android 单元测试与调试包（PowerShell）：
 

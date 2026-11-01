@@ -70,4 +70,6 @@ bash server/scripts/run.sh server
 - 服务器上先自测 `curl http://localhost:8765/api/v1/health`，通了说明服务正常，是网络问题。
 - 服务器防火墙：运行 `sudo ufw status`，若是 active，需要管理员执行 `sudo ufw allow 8765/tcp`（请先征得实验室管理员同意）。
 - 询问管理员：实验室 Wi-Fi 是否允许手机访问服务器的 8765 端口，或是否有客户端隔离。
-- 实在不行，退回方案：手机拍完后在同一网络的电脑上传，或使用笔记本方案（见 `01-server-laptop.md`）。
+- 实在不行，退回方案：使用笔记本方案（见 `01-server-laptop.md`）。手机先连笔记本、电脑再转发到实验室服务器的功能暂不支持，等第二期。
+- （仅供开发者调试）能登录服务器所在网络的电脑上，可以用命令行直接上传一个已取出的拍摄包：
+  `curl -F capture=@cap.zip http://<服务器地址>:8765/api/v1/jobs`。这样生成的结果不会自动回到手机 App 里，普通使用不要走这条路。

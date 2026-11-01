@@ -75,20 +75,29 @@ New-NetFirewallRule -DisplayName "Recon3D server 8765" -Direction Inbound -Proto
 ## 第 3 步（续）：放行 WSL 的 Hyper-V 防火墙入站（同样由你本人执行）
 
 镜像网络模式下，WSL 自己还有一层 "Hyper-V 防火墙"，默认会拦截手机发往 WSL 的入站连接，
-只放行上面的 Windows 规则还不够。仍在**管理员 PowerShell** 里运行：
+只放行上面的 Windows 规则还不够。仍在**管理员 PowerShell** 里运行（只放行 TCP 8765 这一个端口）：
 
 ```powershell
-Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction Allow
+New-NetFirewallHyperVRule -Name Recon3D8765 -DisplayName "Recon3D 8765" -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 8765 -Action Allow
 ```
 
-说明：`{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}` 是 WSL 的 Hyper-V 防火墙配置的固定标识；
-`-DefaultInboundAction Allow` 表示允许入站连接进入 WSL。
-可用 `Get-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}'` 查看，`DefaultInboundAction` 显示 `Allow` 即已生效。
-想撤销（恢复默认拦截），管理员 PowerShell 运行：
+说明：`{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}` 是 WSL 的固定标识；这条规则只允许外部访问 WSL 的 TCP 8765 端口，
+WSL 里的其他端口仍然被拦截（不要改成"整台 WSL 全部放行"，那样 WSL 里任何程序开的端口都会暴露给同一网络的所有设备）。
+
+检查是否已生效：
 
 ```powershell
-Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction NotConfigured
+Get-NetFirewallHyperVRule -Name Recon3D8765
 ```
+
+能看到 `LocalPorts : 8765`、`Action : Allow`、`Enabled : True` 即可。想撤销，管理员 PowerShell 运行：
+
+```powershell
+Remove-NetFirewallHyperVRule -Name Recon3D8765
+```
+
+> 如果你以前按旧版说明执行过 `Set-NetFirewallHyperVVMSetting ... -DefaultInboundAction Allow`（整台 WSL 放行），
+> 建议恢复默认：`Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction NotConfigured`，然后改用上面这条按端口放行的规则。
 
 ## 第 4 步：安装服务端
 
@@ -133,7 +142,7 @@ bash server/scripts/run.sh
 - 手机和笔记本是不是同一个 Wi-Fi？有些 Wi-Fi 开了"AP 隔离/客户端隔离"（学校、实验室常见），设备之间互相访问不了，可换用手机热点让笔记本连接。
 - 第 3 步的防火墙规则是否已创建？Wi-Fi 是否是"专用网络"？
 - 第 2 步 `.wslconfig` 是否生效？改完需 `wsl --shutdown` 后重开 Ubuntu。
-- 第 3 步（续）的 Hyper-V 入站设置是否已执行？这是手机连不上的常见原因：用上面的 `Get-NetFirewallHyperVVMSetting` 命令检查 `DefaultInboundAction` 是否为 `Allow`。
+- 第 3 步（续）的 Hyper-V 入站规则是否已创建？这是手机连不上的常见原因：运行 `Get-NetFirewallHyperVRule -Name Recon3D8765`（Tailscale 方式为 `Recon3D8765TS`），报错"找不到"说明没建。
 - Windows 版本是否 22H2 及以上、`wsl --version` 是否正常（见第 2 步前提）？
 - 服务窗口是否还在运行？
 - 先在笔记本自己的浏览器打开 `http://localhost:8765/api/v1/health`，能打开说明服务本身正常，问题在网络。
@@ -146,18 +155,23 @@ Tailscale 会在手机和笔记本之间建一条加密的虚拟局域网，两�
 1. **笔记本（Windows）**：打开 https://tailscale.com/download 下载 Windows 版并安装，登录一个账号。
 2. **手机**：在 Google Play 安装 "Tailscale"，用**同一个账号**登录，按提示允许建立 VPN。
 3. **WSL 里不用装 Tailscale**：第 2 步的镜像网络模式下，WSL 直接共用 Windows 的 Tailscale 网卡。
-4. **防火墙规则改用 `-Profile Any`**：Windows 通常把 Tailscale 网卡归为"公用网络"，第 3 步的 `-Profile Private` 规则对它不生效。
+4. **防火墙规则：只放行 Tailscale 地址段**。Windows 通常把 Tailscale 网卡归为"公用网络"，第 3 步的 `-Profile Private` 规则对它不生效。
+   这里改用一条 `-Profile Any`（任何网络类型都生效）的规则，但加上 `-RemoteAddress 100.64.0.0/10`：
+   这是 Tailscale 给设备分配的地址段，**只有登录了你 Tailscale 账号的设备能连进来**；
+   即使笔记本连着咖啡馆、机场等公共 Wi-Fi，同一 Wi-Fi 上的陌生设备也访问不了 8765 端口。
    在**管理员 PowerShell** 里（由你本人执行）：
-   - 还没建过第 3 步的规则：
-     ```powershell
-     New-NetFirewallRule -DisplayName "Recon3D server 8765" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Any
-     ```
-   - 已经建过：
-     ```powershell
-     Set-NetFirewallRule -DisplayName "Recon3D server 8765" -Profile Any
-     ```
-   撤销方法与第 3 步相同：`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`。
-5. **第 3 步（续）的 Hyper-V 入站设置不变**，照常执行一次即可。
+   ```powershell
+   New-NetFirewallRule -DisplayName "Recon3D server 8765 Tailscale" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Any -RemoteAddress 100.64.0.0/10
+   ```
+   第 3 步那条 `-Profile Private` 的 Wi-Fi 规则可以保留（两种方式都能用），也可以不建。
+   撤销：`Remove-NetFirewallRule -DisplayName "Recon3D server 8765 Tailscale"`。
+5. **Hyper-V 入站规则同样只放行 Tailscale 地址段**（管理员 PowerShell，由你本人执行）：
+   ```powershell
+   New-NetFirewallHyperVRule -Name Recon3D8765TS -DisplayName "Recon3D 8765 Tailscale" -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 8765 -RemoteAddresses 100.64.0.0/10 -Action Allow
+   ```
+   检查：`Get-NetFirewallHyperVRule -Name Recon3D8765TS`；撤销：`Remove-NetFirewallHyperVRule -Name Recon3D8765TS`。
+   如果已经按第 3 步（续）建了不限地址的 `Recon3D8765`，它已经覆盖 Tailscale，这一条可以不建；
+   想让笔记本在公共 Wi-Fi 上更安全，可删掉 `Recon3D8765`、只保留这条。
 6. **查笔记本的 Tailscale 地址**：PowerShell 运行
 
    ```powershell

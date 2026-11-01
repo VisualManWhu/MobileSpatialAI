@@ -25,12 +25,18 @@
 ```json
 {"index":1,"t_ns":33000000,"image":"images/000001.jpg","depth":"depth/000001.png",
  "pose":[1,0,0,0, 0,1,0,0, 0,0,1,0, 0.1,0,0,1],
- "fx":500.0,"fy":500.0,"cx":320.0,"cy":240.0}
+ "fx":500.0,"fy":500.0,"cx":320.0,"cy":240.0,
+ "depth_fx":62.5,"depth_fy":62.5,"depth_cx":40.0,"depth_cy":30.0}
 ```
 
 - `depth`: 路径或 null。
 - `pose`: 16 个 float，列主序，为 ARCore `Camera.getPose()` 的 world_from_camera，OpenGL 约定（相机朝 -Z，Y 向上）。读取方式：`np.array(pose).reshape(4,4).T`。
 - `fx, fy, cx, cy`: 内参，对应 JPEG 分辨率。
+- `depth_fx, depth_fy, depth_cx, depth_cy`: **可选** float，深度图自己的内参，单位为深度图像素（depth_width x depth_height）。
+  只在该帧有深度时出现（新增于 v1 内，`format_version` 仍为 1，旧包没有这几项也合法）。
+  原因：ARCore 深度图与 GPU 纹理对齐，而不一定与 CPU 图像对齐；App 取 `camera.getTextureIntrinsics()` 的焦距和主点，
+  按 `textureIntrinsics.imageDimensions → depth_width/height` 的比例缩放后写入。
+  缺失时，按图像内参缩放（见下面 depth 一节）。
 
 ## images/*.jpg
 
@@ -38,7 +44,11 @@ ARCore CPU 图像，传感器原始方向（横屏），不旋转。文件缺失
 
 ## depth/*.png
 
-16 位单通道，单位毫米，0 表示无效。分辨率为 depth_width x depth_height，与图像同视场；深度内参按比例缩放（fx * depth_width / image_width 等）。
+16 位单通道，单位毫米，0 表示无效。分辨率为 depth_width x depth_height。
+
+深度内参：帧里有 `depth_fx/fy/cx/cy` 时直接使用；没有时，假定与图像同视场，按比例缩放（fx * depth_width / image_width 等）。
+如果没有深度内参，且深度图宽高比与图像宽高比相差超过 1%（|(dw/dh)/(W/H) − 1| > 0.01），服务端认为无法对齐，
+跳过该帧的深度（记一行日志，不报错），该帧只用于颜色训练。
 
 ## 参考实现
 
