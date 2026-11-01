@@ -7,6 +7,7 @@ dependencies = [
     "pydantic>=2.5",
     "numpy>=1.26",
     "pillow>=10.0",
+    "torch==2.4.1",
 ]
 
 [dependency-groups]
@@ -22,3 +23,12 @@ packages = ["recon3d"]
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+
+# torch 2.4.x + CUDA 12.4 matches the gsplat 1.5.0 "pt24cu124" prebuilt wheel tag.
+[[tool.uv.index]]
+name = "pytorch-cu124"
+url = "https://download.pytorch.org/whl/cu124"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
