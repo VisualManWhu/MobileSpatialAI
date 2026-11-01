@@ -32,6 +32,8 @@ def make_capture(
     cx: float | None = None,
     cy: float | None = None,
     poses: list[list[float]] | None = None,
+    images: list[np.ndarray] | None = None,
+    depths: list[np.ndarray] | None = None,
     name: str = "capture.zip",
 ) -> Path:
     """Write a capture zip into tmp_path and return its path.
@@ -39,7 +41,16 @@ def make_capture(
     drop_image: 1-based frame index whose image file is omitted.
     frame_count: overrides the manifest value only.
     poses: optional list of 16-float column-major poses (one per frame).
+    images: optional list of uint8 HxWx3 arrays (one per frame) instead of flat colors;
+        image_width/height are taken from the first one.
+    depths: optional list of uint16 HxW arrays in millimeters (one per frame); depth
+        width/height are taken from the first one and with_depth is implied.
     """
+    if images is not None:
+        image_height, image_width = images[0].shape[:2]
+    if depths is not None:
+        with_depth = True
+        depth_height, depth_width = depths[0].shape[:2]
     dw = depth_width or max(1, image_width // 8)
     dh = depth_height or max(1, image_height // 8)
     cx = image_width / 2 if cx is None else cx
@@ -72,11 +83,15 @@ def make_capture(
             }))
             if drop_image != i:
                 buf = io.BytesIO()
-                Image.new("RGB", (image_width, image_height),
-                          (40 * i % 256, 100, 160)).save(buf, "JPEG")
+                if images is not None:
+                    Image.fromarray(images[i - 1]).save(buf, "JPEG", quality=95)
+                else:
+                    Image.new("RGB", (image_width, image_height),
+                              (40 * i % 256, 100, 160)).save(buf, "JPEG")
                 zf.writestr(img_name, buf.getvalue())
             if with_depth:
-                arr = np.full((dh, dw), 1500, dtype=np.uint16)
+                arr = (depths[i - 1] if depths is not None
+                       else np.full((dh, dw), 1500, dtype=np.uint16))
                 buf = io.BytesIO()
                 Image.fromarray(arr).save(buf, "PNG")
                 zf.writestr(depth_name, buf.getvalue())
