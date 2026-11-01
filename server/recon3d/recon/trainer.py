@@ -22,6 +22,7 @@ PROGRESS_EVERY = 100
 SH_DEGREE_INTERVAL = 1000
 SSIM_LAMBDA = 0.2
 PACKED = True  # packed projection: lower memory; the strategy must be told
+RESET_EVERY = 3000  # opacity reset period (upstream default)
 
 
 @dataclass
@@ -167,9 +168,13 @@ def train(
 ) -> Splats:
     """Optimize Gaussians on ts. Calls on_progress(i/iterations) every 100 steps (and at the end)."""
     from gsplat import DefaultStrategy
+    from gsplat.strategy import ops
 
     iters = profile.iterations
-    images = ts.images.to(device)
+    # The image stack stays on the CPU (a real capture is GBs of float32); one frame is
+    # copied to the GPU per step. Not pinned: pinning multi-GB host buffers is unreliable
+    # under WSL and the per-step copy is ~1 ms.
+    images = ts.images.cpu()
     viewmats = torch.linalg.inv(ts.c2w.to(device))
     Ks = ts.K.to(device)
     n_img, H, W = images.shape[:3]
@@ -194,7 +199,7 @@ def train(
     strategy = DefaultStrategy(
         refine_start_iter=min(500, iters // 10),
         refine_stop_iter=iters // 2,
-        reset_every=3000,
+        reset_every=RESET_EVERY,
         refine_every=100,
     )
     strategy.check_sanity(params, optimizers)
@@ -206,21 +211,26 @@ def train(
         i = int(torch.randint(n_img, (1,), generator=gen))
         sh_deg = min(step // SH_DEGREE_INTERVAL, profile.sh_degree)
         img, _, info = _rasterize(params, viewmats[i : i + 1], Ks[i : i + 1], W, H, sh_deg)
-        gt = images[i : i + 1]
-        densify = len(params["means"]) < profile.max_gaussians
-        if densify:
-            strategy.step_pre_backward(params, optimizers, state, step, info)
+        gt = images[i : i + 1].to(device, non_blocking=True)
+        strategy.step_pre_backward(params, optimizers, state, step, info)
         l1 = (img - gt).abs().mean()
         ssim_v = ssim(img.permute(0, 3, 1, 2), gt.permute(0, 3, 1, 2), window)
         loss = (1.0 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * (1.0 - ssim_v)
         loss.backward()
-        if densify:
-            strategy.step_post_backward(params, optimizers, state, step, info, packed=PACKED)
-            _enforce_cap(params, optimizers, state, profile.max_gaussians)
+        # Same order as upstream simple_trainer: optimizer step first, then the
+        # strategy (grow/prune) on the updated params.
         for opt in optimizers.values():
             opt.step()
             opt.zero_grad(set_to_none=True)
         means_sched.step()
+        # The strategy keeps running at the cap so pruning continues; growth past the
+        # cap is trimmed (lowest opacity first) right after.
+        strategy.step_post_backward(params, optimizers, state, step, info, packed=PACKED)
+        _enforce_cap(params, optimizers, state, profile.max_gaussians)
+        # gsplat 1.5.3 never resets opacity (`step % reset_every == 0 & step > 0` is
+        # always False by operator precedence), so do the strategy's reset here.
+        if 0 < step < strategy.refine_stop_iter and step % strategy.reset_every == 0:
+            ops.reset_opa(params=params, optimizers=optimizers, state=state, value=strategy.prune_opa * 2.0)
         if (step + 1) % PROGRESS_EVERY == 0 or step + 1 == iters:
             on_progress((step + 1) / iters)
 

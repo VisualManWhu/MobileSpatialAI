@@ -85,6 +85,74 @@ def test_enforce_cap_prunes_lowest_opacity():
 
 
 @pytest.mark.gpu
+def test_image_stack_not_resident_on_gpu(synthetic_ts):
+    # 16x the train views (384 frames) kept on CPU; only one frame per step may go to GPU.
+    tr = synthetic_ts[0]
+    reps = 16
+    ts = dataclasses.replace(
+        tr,
+        images=tr.images.cpu().repeat(reps, 1, 1, 1),
+        K=tr.K.cpu().repeat(reps, 1, 1),
+        c2w=tr.c2w.cpu().repeat(reps, 1, 1),
+        depths=list(tr.depths) + [None] * (len(tr.depths) * (reps - 1)),
+    )
+    stack_bytes = ts.images.numel() * 4
+    p = dataclasses.replace(PROFILES["laptop"], iterations=200, max_gaussians=20000)
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    train(ts, p, on_progress=lambda p: None)
+    peak = torch.cuda.max_memory_allocated() - base
+    assert peak < stack_bytes / 2, (peak, stack_bytes)
+    assert ts.images.device.type == "cpu"
+
+
+@pytest.mark.gpu
+def test_opacity_reset_runs(synthetic_ts, monkeypatch):
+    import gsplat.strategy.ops as ops
+
+    from recon3d.recon import trainer as trainer_mod
+
+    seen = []
+    orig = ops.reset_opa
+
+    def spy(params, optimizers, state, value):
+        orig(params=params, optimizers=optimizers, state=state, value=value)
+        seen.append((value, float(torch.sigmoid(params["opacities"]).max())))
+
+    monkeypatch.setattr(ops, "reset_opa", spy)
+    monkeypatch.setattr(trainer_mod, "RESET_EVERY", 100)
+    p = dataclasses.replace(PROFILES["laptop"], iterations=600, max_gaussians=20000)
+    train(synthetic_ts[0], p, on_progress=lambda p: None)
+    # refine_stop = 300 -> resets at steps 100 and 200
+    assert len(seen) == 2
+    for value, max_opa in seen:
+        assert max_opa <= value + 1e-4
+
+
+@pytest.mark.gpu
+def test_pruning_continues_at_cap(synthetic_ts, monkeypatch):
+    from gsplat import DefaultStrategy
+
+    pruned = []
+    orig = DefaultStrategy._prune_gs
+
+    def spy(self, params, optimizers, state, step):
+        n = orig(self, params, optimizers, state, step)
+        pruned.append(n)
+        return n
+
+    monkeypatch.setattr(DefaultStrategy, "_prune_gs", spy)
+    # No depth -> 5000 random init points, subsampled to exactly the cap; many float in
+    # empty space and must still be pruned although the count starts at the cap.
+    ts = dataclasses.replace(synthetic_ts[0], depths=[None] * len(synthetic_ts[0].depths))
+    p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=3000)
+    n = train(ts, p, on_progress=lambda p: None).means.shape[0]
+    assert sum(pruned) > 0
+    assert n <= 3000
+
+
+@pytest.mark.gpu
 def test_reports_progress_every_100_steps(synthetic_ts):
     seen = []
     p = dataclasses.replace(PROFILES["laptop"], iterations=300, sh_degree=0)
