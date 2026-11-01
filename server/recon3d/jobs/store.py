@@ -36,6 +36,39 @@ class JobStatus:
     created_at: float
 
 
+class Upload:
+    """A capture.zip being written. write() enforces the store's size cap as bytes arrive."""
+
+    def __init__(self, store: JobStore):
+        self._store = store
+        self.job_id = uuid.uuid4().hex[:12]
+        self.dir = store.job_dir(self.job_id)
+        self.dir.mkdir()
+        self.size = 0
+        self._f = open(self.dir / "capture.zip", "wb")
+
+    def write(self, data: bytes) -> None:
+        self.size += len(data)
+        if self.size > self._store.max_upload_bytes:
+            raise UploadTooLargeError(self._store.max_upload_bytes)
+        self._f.write(data)
+
+    def abort(self) -> None:
+        """Discard the partial upload (idempotent)."""
+        self._f.close()
+        shutil.rmtree(self.dir, ignore_errors=True)
+
+    def commit(self) -> str:
+        """Finish the upload, write status queued and enqueue the job."""
+        try:
+            self._f.close()
+            self._store._commit(self.job_id, self.size)
+        except BaseException:
+            self.abort()
+            raise
+        return self.job_id
+
+
 class JobStore:
     def __init__(self, data_dir: Path, max_upload_bytes: int = DEFAULT_MAX_UPLOAD_BYTES):
         self.data_dir = Path(data_dir)
@@ -48,27 +81,25 @@ class JobStore:
     def job_dir(self, job_id: str) -> Path:
         return self.jobs_dir / job_id
 
+    def begin_upload(self) -> Upload:
+        """Open a new job's capture.zip for incremental writing; finish with commit() or abort()."""
+        return Upload(self)
+
     def create(self, stream: BinaryIO) -> str:
-        """Stream the upload to disk in chunks, then enqueue. Raises UploadTooLargeError."""
-        job_id = uuid.uuid4().hex[:12]
-        d = self.job_dir(job_id)
-        d.mkdir()
+        """Copy a file-like to a new job in chunks, then enqueue. Raises UploadTooLargeError."""
+        up = self.begin_upload()
         try:
-            written = 0
-            with open(d / "capture.zip", "wb") as f:
-                while chunk := stream.read(CHUNK):
-                    written += len(chunk)
-                    if written > self.max_upload_bytes:
-                        raise UploadTooLargeError(self.max_upload_bytes)
-                    f.write(chunk)
+            while chunk := stream.read(CHUNK):
+                up.write(chunk)
         except BaseException:
-            shutil.rmtree(d, ignore_errors=True)
+            up.abort()
             raise
-        status = JobStatus(job_id, "queued", 0.0, "排队中", time.time())
-        self._write(status)
-        self.log(job_id, f"created ({written} bytes), state=queued")
+        return up.commit()
+
+    def _commit(self, job_id: str, size: int) -> None:
+        self._write(JobStatus(job_id, "queued", 0.0, "排队中", time.time()))
+        self.log(job_id, f"created ({size} bytes), state=queued")
         self.queue.put(job_id)
-        return job_id
 
     def get(self, job_id: str) -> JobStatus | None:
         if not _JOB_ID.fullmatch(job_id):

@@ -90,3 +90,94 @@ def test_startup_recovers_interrupted_jobs(tmp_path):
     with _client(tmp_path, _fast) as c:
         s = c.get(f"/api/v1/jobs/{j}").json()
     assert s["state"] == "failed" and "服务重启" in s["message"]
+
+
+BOUNDARY = "r3dboundary"
+
+
+def _multipart(payload: bytes, name: str = "capture", closing: bool = True) -> bytes:
+    head = (
+        f"--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"c.zip\"\r\n"
+        "Content-Type: application/zip\r\n\r\n"
+    ).encode()
+    return head + payload + (f"\r\n--{BOUNDARY}--\r\n".encode() if closing else b"")
+
+
+def _chunked(body: bytes, size: int = 7):
+    # A generator body makes httpx send Transfer-Encoding: chunked with no Content-Length.
+    for i in range(0, len(body), size):
+        yield body[i : i + size]
+
+
+MP_HEADERS = {"content-type": f"multipart/form-data; boundary={BOUNDARY}"}
+
+
+def test_declared_content_length_over_cap_is_413_before_body(tmp_path):
+    with _client(tmp_path, _fast, max_upload_bytes=100) as c:
+        headers = {**MP_HEADERS, "content-length": str(10 * 1024**2)}
+        r = c.post("/api/v1/jobs", content=b"tiny", headers=headers)
+        assert r.status_code == 413 and "上传" in r.json()["detail"]
+        assert list((tmp_path / "data" / "jobs").iterdir()) == []
+
+
+def test_chunked_oversize_is_413_and_nothing_left(tmp_path):
+    with _client(tmp_path, _fast, max_upload_bytes=100) as c:
+        body = _multipart(b"x" * 500)
+        r = c.post("/api/v1/jobs", content=_chunked(body), headers=MP_HEADERS)
+        assert r.status_code == 413
+        assert list((tmp_path / "data" / "jobs").iterdir()) == []
+
+
+def test_chunked_upload_streams_to_capture_zip(tmp_path):
+    payload = bytes(range(256)) * 40  # crosses many tiny chunks and contains CR/LF bytes
+    with _client(tmp_path, _fast) as c:
+        r = c.post("/api/v1/jobs", content=_chunked(_multipart(payload)), headers=MP_HEADERS)
+        assert r.status_code == 201
+        jid = r.json()["job_id"]
+        assert (tmp_path / "data" / "jobs" / jid / "capture.zip").read_bytes() == payload
+        assert [p.name for p in (tmp_path / "data" / "jobs").iterdir()] == [jid]
+
+
+def test_truncated_upload_is_400_and_nothing_left(tmp_path):
+    with _client(tmp_path, _fast) as c:
+        r = c.post("/api/v1/jobs", content=_multipart(b"abc", closing=False), headers=MP_HEADERS)
+        assert r.status_code == 400
+        assert list((tmp_path / "data" / "jobs").iterdir()) == []
+
+
+def test_non_multipart_is_422(client):
+    r = client.post("/api/v1/jobs", content=b"zip", headers={"content-type": "application/zip"})
+    assert r.status_code == 422
+
+
+def test_oversize_stream_stops_reading_at_cap(tmp_path):
+    """Raw ASGI (TestClient buffers the whole body): the app must stop pulling body
+    chunks once past the cap, i.e. nothing is spooled beyond it."""
+    import anyio
+
+    store = JobStore(tmp_path / "data", max_upload_bytes=100)
+    app = create_app(store, Worker(store, _fast), PROFILES["laptop"])
+    body = _multipart(b"x" * 200_000)
+    chunks = [body[i : i + 1000] for i in range(0, len(body), 1000)]
+    pulled = 0
+    sent = []
+
+    async def receive():
+        nonlocal pulled
+        pulled += 1
+        i = pulled - 1
+        return {"type": "http.request", "body": chunks[i], "more_body": i + 1 < len(chunks)}
+
+    async def send(msg):
+        sent.append(msg)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "POST",
+        "scheme": "http", "path": "/api/v1/jobs", "raw_path": b"/api/v1/jobs", "query_string": b"",
+        "root_path": "", "headers": [(b"content-type", MP_HEADERS["content-type"].encode())],
+        "client": ("test", 1), "server": ("test", 80),
+    }
+    anyio.run(app, scope, receive, send)
+    assert sent[0]["status"] == 413
+    assert pulled < 100 < len(chunks)  # cap + 64 KiB form allowance ≈ 66 chunks
+    assert list((tmp_path / "data" / "jobs").iterdir()) == []

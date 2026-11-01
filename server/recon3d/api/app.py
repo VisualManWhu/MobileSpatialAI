@@ -5,13 +5,13 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, JSONResponse
-from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import UploadFile
+from fastapi.responses import FileResponse
 
 from recon3d import __version__
+from recon3d.api.upload import FORM_OVERHEAD, receive_capture
+from recon3d.api.upload import too_large as _too_large
 from recon3d.config import Profile
-from recon3d.jobs.store import JobStore, UploadTooLargeError
+from recon3d.jobs.store import JobStore
 from recon3d.jobs.worker import Worker
 
 NOT_FOUND = "任务不存在"
@@ -29,11 +29,6 @@ def gpu_name() -> str:
     except Exception:
         pass
     return NO_GPU
-
-
-def _too_large(store: JobStore) -> HTTPException:
-    gb = store.max_upload_bytes / 1024**3
-    return HTTPException(413, f"上传文件过大，上限 {gb:g} GB")
 
 
 def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
@@ -63,22 +58,11 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
 
     @api.post("/jobs", status_code=201)
     async def create_job(request: Request):
-        # Reject from the header before the body is received when possible.
+        # Reject from the header before reading the body when possible.
         length = request.headers.get("content-length")
-        if length and length.isdigit() and int(length) > store.max_upload_bytes + 64 * 1024:
+        if length and length.isdigit() and int(length) > store.max_upload_bytes + FORM_OVERHEAD:
             raise _too_large(store)
-        # Starlette spools file parts to a temp file (not memory) while parsing.
-        form = await request.form(max_files=1, max_fields=8)
-        try:
-            upload = form.get("capture")
-            if not isinstance(upload, UploadFile):
-                return JSONResponse({"detail": "缺少 capture 字段（拍摄包 zip）"}, status_code=422)
-            try:
-                job_id = await run_in_threadpool(store.create, upload.file)
-            except UploadTooLargeError:
-                raise _too_large(store) from None
-        finally:
-            await form.close()
+        job_id = await receive_capture(request, store)
         return {"job_id": job_id}
 
     @api.get("/jobs/{job_id}")

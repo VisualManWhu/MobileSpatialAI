@@ -150,3 +150,39 @@ def test_worker_stop_joins_thread(store):
     w.start()
     w.stop()
     assert not w.is_alive()
+
+
+def test_oom_detected_from_runtime_error_message(store, make_worker):
+    def pipe(d, p):
+        raise RuntimeError("CUDA error: out of memory")
+
+    make_worker(pipe).start()
+    j = store.create(io.BytesIO(b"a"))
+    wait_until(lambda: store.get(j).state == "failed")
+    assert "显存不足" in store.get(j).message
+
+
+def test_oom_detection_paths():
+    from recon3d.jobs.worker import is_oom
+
+    class Sub(torch.cuda.OutOfMemoryError):
+        pass
+
+    assert is_oom(torch.cuda.OutOfMemoryError())
+    assert is_oom(Sub())  # matched through the MRO, not the exact class name
+    assert is_oom(RuntimeError("CUDA error: out of memory"))
+    assert is_oom(RuntimeError("CUBLAS_STATUS_ALLOC_FAILED: Out Of Memory"))
+    assert not is_oom(RuntimeError("shape mismatch"))
+
+
+def test_start_twice_runs_one_thread(store):
+    import threading
+
+    w = Worker(store, lambda d, p: None)
+    w.start()
+    w.start()
+    try:
+        assert sum(t.name == "recon3d-worker" for t in threading.enumerate()) == 1
+    finally:
+        w.stop()
+    assert not any(t.name == "recon3d-worker" for t in threading.enumerate())

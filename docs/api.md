@@ -16,7 +16,10 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
 
 错误：
 - `413`：拍摄包超过服务端上限（默认 4 GB，`--max-upload-gb` 可调），`{"detail":"上传文件过大，上限 4 GB"}`
-- `422`：缺少 `capture` 字段
+- `422`：缺少 `capture` 字段，或请求不是 `multipart/form-data`
+- `400`：上传不完整或 multipart 格式错误
+
+上传按流式解析直接写入磁盘；无 `Content-Length`（分块传输）时同样在超过上限的瞬间返回 413。
 
 ## GET /jobs/{id}
 

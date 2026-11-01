@@ -16,11 +16,18 @@ OOM_MESSAGE = "显存不足，请降低分辨率或改用服务器"
 EXPORT_START = 0.9
 
 
+def is_oom(e: BaseException) -> bool:
+    """torch.cuda.OutOfMemoryError (or a subclass), matched by name so this module never
+    imports torch; or a RuntimeError such as "CUDA error: out of memory" / CUBLAS alloc."""
+    if any(cls.__name__ == "OutOfMemoryError" for cls in type(e).__mro__):
+        return True
+    return "out of memory" in str(e).lower()
+
+
 def failure_message(e: BaseException) -> str:
     if isinstance(e, CaptureFormatError):
         return e.message_zh
-    # torch.cuda.OutOfMemoryError, matched by name so this module never imports torch.
-    if type(e).__name__ == "OutOfMemoryError":
+    if is_oom(e):
         return OOM_MESSAGE
     return "重建失败：" + type(e).__name__
 
@@ -33,6 +40,8 @@ class Worker:
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
+        if self.is_alive():
+            return
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="recon3d-worker", daemon=True)
         self._thread.start()
