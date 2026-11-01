@@ -3,9 +3,12 @@ package dev.recon3d.capture
 import android.Manifest
 import android.app.Activity
 import android.content.pm.ActivityInfo
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.opengl.GLSurfaceView
 import android.os.Build
+import android.provider.Settings
 import android.util.Log
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -92,7 +95,24 @@ fun CaptureScreen(roomId: String, onFinished: (zip: File) -> Unit, modifier: Mod
     var granted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
     }
-    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted = it }
+    // Permanently denied = a request was answered "deny" and the system will no longer show the dialog
+    // (shouldShowRequestPermissionRationale is false after a denial).
+    var permanentlyDenied by remember { mutableStateOf(false) }
+    val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { ok ->
+        granted = ok
+        permanentlyDenied = !ok && !activity.shouldShowRequestPermissionRationale(Manifest.permission.CAMERA)
+    }
+    // Coming back from system settings: re-check the permission.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val obs = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME && !granted) {
+                granted = ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
 
     // The guide's arrows assume portrait; also keep the screen awake while capturing.
     DisposableEffect(activity) {
@@ -110,8 +130,20 @@ fun CaptureScreen(roomId: String, onFinished: (zip: File) -> Unit, modifier: Mod
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(16.dp),
             ) {
-                Text("拍摄需要使用相机", color = Color.White, style = MaterialTheme.typography.titleMedium)
-                Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("授予相机权限") }
+                if (permanentlyDenied) {
+                    Text(
+                        "相机权限已被拒绝，请在系统设置中开启",
+                        color = Color.White, style = MaterialTheme.typography.titleMedium, textAlign = TextAlign.Center,
+                    )
+                    Button(onClick = {
+                        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.fromParts("package", context.packageName, null))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        context.startActivity(intent)
+                    }) { Text("打开设置") }
+                } else {
+                    Text("拍摄需要使用相机", color = Color.White, style = MaterialTheme.typography.titleMedium)
+                    Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) { Text("授予相机权限") }
+                }
             }
         }
     }
@@ -207,10 +239,11 @@ private class ArHost(private val activity: Activity, private val roomId: String)
             renderer = r
             return true
         } catch (e: UnavailableException) {
+            Log.e(TAG, "ARCore unavailable", e)
             error = arcoreErrorZh(e)
         } catch (e: Exception) {
             Log.e(TAG, "AR session failed", e)
-            error = "AR 启动失败：${e.message}"
+            error = MSG_AR_START_FAILED
         }
         return false
     }
@@ -231,8 +264,11 @@ private fun arcoreErrorZh(e: UnavailableException): String = when (e) {
     is UnavailableApkTooOldException -> "请在应用商店更新 Google Play 服务（AR）"
     is UnavailableSdkTooOldException -> "本应用版本过旧，请更新"
     is UnavailableDeviceNotCompatibleException -> "这台手机不支持 ARCore"
-    else -> "AR 不可用：${e.message}"
+    else -> MSG_AR_START_FAILED
 }
+
+private const val MSG_AR_START_FAILED = "AR 启动失败，请检查是否已安装/更新 ARCore（Google Play 服务 - AR）后重试"
+internal const val MSG_NO_DEPTH_FALLBACK = "未获取到深度，本次拍摄将不含深度（重建质量可能下降）"
 
 @Composable
 private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> Unit) {
@@ -271,11 +307,17 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
     val pipeline = host.pipeline ?: return
     val guideUi by renderer.ui.collectAsState()
     val depthReady by renderer.depthReady.collectAsState()
-    val ui = if (depthReady) guideUi else guideUi.copy(subHint = "正在等待深度传感器…")
+    val depthFallback by renderer.depthFallback.collectAsState()
+    var recording by remember { mutableStateOf(false) }
+    val ui = when {
+        !depthReady -> guideUi.copy(subHint = "正在等待深度传感器…")
+        // R27: tell the user the capture has no depth (the guide's own warning, if any, takes precedence).
+        depthFallback && recording -> guideUi.copy(warning = guideUi.warning ?: MSG_NO_DEPTH_FALLBACK)
+        else -> guideUi
+    }
     val kept by pipeline.kept.collectAsState()
     val dropped by pipeline.dropped.collectAsState()
     val failed by pipeline.failed.collectAsState()
-    var recording by remember { mutableStateOf(false) }
     var finishing by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -328,7 +370,7 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
                         }
                     } catch (e: Exception) {
                         Log.e("CaptureScreen", "finish failed", e)
-                        message = "保存失败：${e.message}"
+                        message = "保存失败，请返回重拍"
                     } finally {
                         finishing = false
                     }

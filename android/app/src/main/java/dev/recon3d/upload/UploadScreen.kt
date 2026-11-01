@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import dev.recon3d.net.Api
+import dev.recon3d.net.ApiClient
 import dev.recon3d.net.ApiException
 import dev.recon3d.net.JobState
 import dev.recon3d.rooms.CaptureRecord
@@ -37,6 +38,12 @@ import kotlin.time.Duration.Companion.seconds
 const val MSG_ZIP_MISSING = "拍摄文件丢失，请重新拍摄"
 const val MSG_UPLOAD_INTERRUPTED = "上传被中断，请重新上传"
 const val MSG_DOWNLOADING = "正在下载模型…"
+const val MSG_UNEXPECTED = "出错了，请重试；如反复出现请重启应用"
+
+/** Consecutive unreachable polls tolerated before a tracked job is marked failed (ruling R29). */
+const val MAX_POLL_ERRORS = 10
+private const val MSG_RETRYING_PREFIX = "网络暂时不可用，正在重试"
+internal fun retryingMessage(n: Int) = "$MSG_RETRYING_PREFIX ($n/$MAX_POLL_ERRORS)"
 
 /** Server 404 detail for an unknown job (docs/api.md): the job is gone, so retry must re-upload. */
 private const val MSG_JOB_GONE = "任务不存在"
@@ -111,7 +118,8 @@ class UploadViewModel(
                 } catch (e: ApiException) {
                     fail(roomId, captureId, e.messageZh, jobGone = e.messageZh == MSG_JOB_GONE)
                 } catch (e: Exception) {
-                    fail(roomId, captureId, "出错了：${e.message ?: e.javaClass.simpleName}", jobGone = false)
+                    log("unexpected error for $roomId/$captureId", e)
+                    fail(roomId, captureId, MSG_UNEXPECTED, jobGone = false)
                 }
             }
             running[key] = job
@@ -149,9 +157,27 @@ class UploadViewModel(
         return jobId
     }
 
+    /**
+     * Polls until done/failed. Connection errors ([ApiClient.MSG_UNREACHABLE]) are tolerated up to
+     * [MAX_POLL_ERRORS] in a row with backoff (poll, 2×poll, … capped at [MAX_BACKOFF]), keeping the last
+     * known state; the record fails only on the [MAX_POLL_ERRORS]th consecutive error.
+     */
     private suspend fun track(roomId: String, captureId: String, jobId: String) {
+        var errors = 0
         while (true) {
-            val status = api.job(jobId)
+            val status = try {
+                api.job(jobId)
+            } catch (e: ApiException) {
+                if (e.messageZh != ApiClient.MSG_UNREACHABLE) throw e
+                errors++
+                if (errors >= MAX_POLL_ERRORS) throw e
+                repo.editCapture(roomId, captureId) {
+                    if (it.state in ACTIVE) it.copy(message = retryingMessage(errors)) else it
+                }
+                delay(backoff(errors))
+                continue
+            }
+            errors = 0
             when (status.state) {
                 JobState.DONE -> {
                     repo.editCapture(roomId, captureId) {
@@ -188,15 +214,28 @@ class UploadViewModel(
         }
     }
 
+    /** n-th consecutive error: poll × 2^(n-1), capped at [MAX_BACKOFF]. */
+    private fun backoff(n: Int): Duration {
+        var d = poll
+        repeat(n - 1) { if (d < MAX_BACKOFF) d *= 2 }
+        return minOf(d, MAX_BACKOFF)
+    }
+
     private companion object {
         const val TAG = "UploadViewModel"
         val ACTIVE = setOf("queued", "training", "exporting")
+        val MAX_BACKOFF = 30.seconds
     }
 }
 
 /** Chinese status line for a capture row, e.g. `训练中 42%` or `失败：<原因>`. */
 fun captureStatusText(record: CaptureRecord): String {
     val pct = (record.progress * 100).roundToInt().coerceIn(0, 100)
+    val retrying = record.message?.takeIf { it.startsWith(MSG_RETRYING_PREFIX) }
+    if (retrying != null && record.state in setOf("queued", "training", "exporting")) {
+        val base = captureStatusText(record.copy(message = null))
+        return "$base · $retrying"
+    }
     return when (record.state) {
         "local" -> "本地"
         "uploading" -> "上传中 $pct%"
@@ -208,6 +247,9 @@ fun captureStatusText(record: CaptureRecord): String {
         else -> record.state
     }
 }
+
+/** "重试" resumes polling a known server job; "重新上传" sends the zip again. */
+fun retryButtonLabel(record: CaptureRecord): String = if (record.jobId != null) "重试" else "重新上传"
 
 /** One capture: id, Chinese status, progress bar while uploading/training, and its action button. */
 @Composable
@@ -227,7 +269,9 @@ fun CaptureRow(
                 }
                 when (record.state) {
                     "local" -> Button(onClick = onUpload) { Text("上传") }
-                    "failed" -> OutlinedButton(onClick = onRetry) { Text("重新上传") }
+                    "failed" -> OutlinedButton(onClick = onRetry) {
+                        Text(retryButtonLabel(record))
+                    }
                     "done" -> Button(onClick = onView) { Text("查看 3D") }
                 }
             }

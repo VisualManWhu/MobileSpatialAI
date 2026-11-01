@@ -31,7 +31,20 @@ class FrameJob(
     val fx: Float, val fy: Float, val cx: Float, val cy: Float,
 )
 
-class DepthBytes(val data: ByteArray, val width: Int, val height: Int, val rowStrideBytes: Int)
+/** [intrinsics]: optional `[fx, fy, cx, cy]` in depth-image pixels (see [DepthIntrinsics]). */
+class DepthBytes(
+    val data: ByteArray, val width: Int, val height: Int, val rowStrideBytes: Int,
+    val intrinsics: FloatArray? = null,
+)
+
+/** Depth-image intrinsics: GPU-texture intrinsics scaled to the depth resolution. */
+object DepthIntrinsics {
+    fun scaled(focal: FloatArray, principal: FloatArray, dims: IntArray, depthW: Int, depthH: Int): FloatArray {
+        val sx = depthW.toFloat() / dims[0]
+        val sy = depthH.toFloat() / dims[1]
+        return floatArrayOf(focal[0] * sx, focal[1] * sy, principal[0] * sx, principal[1] * sy)
+    }
+}
 
 /**
  * Bounded keyframe queue (max [MAX_PENDING] jobs) consumed by ONE IO coroutine that does YUV→JPEG and
@@ -80,9 +93,9 @@ class CapturePipeline(
                     ).also { writer = it }
                 }
                 val jpeg = encodeJpeg(job)
-                val depth = job.depth?.takeIf { it.width == depthW && it.height == depthH }
-                    ?.let { ImageConvert.depth16ToMm(it.data, it.width, it.height, it.rowStrideBytes) }
-                w.addFrame(job.tNs, jpeg, depth, job.pose, job.fx, job.fy, job.cx, job.cy)
+                val d = job.depth?.takeIf { it.width == depthW && it.height == depthH }
+                val depth = d?.let { ImageConvert.depth16ToMm(it.data, it.width, it.height, it.rowStrideBytes) }
+                w.addFrame(job.tNs, jpeg, depth, job.pose, job.fx, job.fy, job.cx, job.cy, depthIntrinsics = d?.intrinsics)
                 _kept.value++
             } catch (e: CancellationException) {
                 throw e

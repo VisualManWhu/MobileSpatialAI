@@ -67,6 +67,24 @@ class CapturePackageWriterTest {
         assertFalse(entries(zip).contains("depth/000002.png"))
     }
 
+    @Test fun depthIntrinsicsWrittenOnlyWhenDepthPresent() {
+        val w = writer()
+        val k = floatArrayOf(3.5f, 3.25f, 2f, 1.5f)
+        w.addFrame(1, jpeg(1), depth(4, 3), identity(), 500f, 500f, 320f, 240f, depthIntrinsics = k)
+        w.addFrame(2, jpeg(2), null, identity(), 500f, 500f, 320f, 240f, depthIntrinsics = k)
+        w.addFrame(3, jpeg(3), depth(4, 3), identity(), 500f, 500f, 320f, 240f)
+        val lines = text(w.finish(), "frames.jsonl").lines().filter { it.isNotBlank() }
+        val f1 = Json.parseToJsonElement(lines[0]).jsonObject
+        assertEquals(3.5f, f1["depth_fx"]!!.jsonPrimitive.content.toFloat(), 0f)
+        assertEquals(3.25f, f1["depth_fy"]!!.jsonPrimitive.content.toFloat(), 0f)
+        assertEquals(2f, f1["depth_cx"]!!.jsonPrimitive.content.toFloat(), 0f)
+        assertEquals(1.5f, f1["depth_cy"]!!.jsonPrimitive.content.toFloat(), 0f)
+        for (i in 1..2) {
+            val f = Json.parseToJsonElement(lines[i]).jsonObject
+            assertFalse(listOf("depth_fx", "depth_fy", "depth_cx", "depth_cy").any { it in f })
+        }
+    }
+
     @Test fun finishDeletesStagingAndReturnsZip() {
         val stage = File(tmp.root, "stage")
         val w = writer(stage)
@@ -90,6 +108,7 @@ class CapturePackageWriterTest {
             w.addFrame(
                 (i + 1) * 200_000_000L, ByteArray(64) { (it * (i + 1)).toByte() },
                 ShortArray(48) { (500 + it * 10 + i).toShort() }, p, 50f, 50f, 32f, 24f,
+                depthIntrinsics = floatArrayOf(6.5f, 6.5f, 4f, 3f),
             )
         }
         val zip = w.finish()

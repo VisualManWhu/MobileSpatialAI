@@ -60,6 +60,26 @@ class CapturePipelineTest {
         }
     }
 
+    @Test fun depthIntrinsicsPassThroughOnlyWithDepth() = runBlocking {
+        val p = pipeline(intArrayOf(2, 1)) { byteArrayOf(1) }
+        val k = floatArrayOf(1.5f, 1.25f, 1f, 0.5f)
+        p.submit(job(1, DepthBytes(le(9000) + le(0xFFFF), 2, 1, 4, k)))
+        p.submit(job(2, DepthBytes(ByteArray(8), 4, 1, 8, k))) // wrong size → no depth, no depth intrinsics
+        val zip = p.finish()!!
+        ZipFile(zip).use { z ->
+            val lines = z.getInputStream(z.getEntry("frames.jsonl")).bufferedReader().readLines()
+            assertTrue(lines[0].contains("\"depth_fx\":1.5")); assertTrue(lines[0].contains("\"depth_cy\":0.5"))
+            assertTrue(!lines[1].contains("depth_fx"))
+        }
+    }
+
+    @Test fun depthIntrinsicsScaleTextureIntrinsicsToDepthSize() {
+        // texture 1920x1080 -> depth 160x90 (scale 1/12)
+        val k = DepthIntrinsics.scaled(floatArrayOf(1440f, 1452f), floatArrayOf(960f, 540f), intArrayOf(1920, 1080), 160, 90)
+        assertEquals(120f, k[0], 1e-4f); assertEquals(121f, k[1], 1e-4f)
+        assertEquals(80f, k[2], 1e-4f); assertEquals(45f, k[3], 1e-4f)
+    }
+
     @Test fun finishWithNoFramesReturnsNull() = runBlocking {
         val p = pipeline(null) { byteArrayOf(1) }
         assertEquals(false, p.hasFrames())

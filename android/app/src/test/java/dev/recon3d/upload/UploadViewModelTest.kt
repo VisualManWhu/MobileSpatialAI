@@ -1,6 +1,7 @@
 package dev.recon3d.upload
 
 import dev.recon3d.net.Api
+import dev.recon3d.net.ApiClient
 import dev.recon3d.net.ApiException
 import dev.recon3d.net.Health
 import dev.recon3d.net.JobState
@@ -33,6 +34,7 @@ private class FakeApi : Api {
     var polls = 0
     private var uploadFailure: ApiException? = null
     private var jobFailure: ApiException? = null
+    private var jobFailuresLeft = 0
     private var downloadFailure: ApiException? = null
     /** Virtual-time delay inside upload, to overlap calls. */
     var uploadDelayMs = 0L
@@ -41,9 +43,11 @@ private class FakeApi : Api {
     var jobResult: JobStatus = JobStatus("j", JobState.DONE, 1f, "完成")
     val jobQueue = ArrayDeque<JobStatus>()
     val sceneBytes = byteArrayOf(1, 2, 3, 4)
+    var jobThrow: Exception? = null
 
     fun failUploadOnce(e: ApiException) { uploadFailure = e }
-    fun failJobOnce(e: ApiException) { jobFailure = e }
+    fun failJobOnce(e: ApiException) = failJobTimes(1, e)
+    fun failJobTimes(n: Int, e: ApiException) { jobFailure = e; jobFailuresLeft = n }
     fun failDownloadOnce(e: ApiException) { downloadFailure = e }
 
     override suspend fun health() = Health("0.1.0", "gpu", "laptop")
@@ -58,7 +62,8 @@ private class FakeApi : Api {
 
     override suspend fun job(id: String): JobStatus {
         polls++
-        jobFailure?.let { jobFailure = null; throw it }
+        jobThrow?.let { jobThrow = null; throw it }
+        jobFailure?.let { if (--jobFailuresLeft <= 0) jobFailure = null; throw it }
         return jobQueue.removeFirstOrNull() ?: jobResult
     }
 
@@ -140,7 +145,7 @@ class UploadViewModelTest {
 
     @Test fun retryResumesPollingWhenJobIdExists() = runTest {
         val vm = vm()
-        api.failJobOnce(ApiException("连不上计算端，请检查 Wi-Fi 和地址"))
+        api.failJobTimes(MAX_POLL_ERRORS, ApiException(ApiClient.MSG_UNREACHABLE))
         vm.start(room, cap); advanceUntilIdle()
         val failed = repo.capture(room, cap)
         assertEquals("failed", failed.state)
@@ -149,6 +154,66 @@ class UploadViewModelTest {
         vm.retry(room, cap); advanceUntilIdle()
         assertEquals("done", repo.capture(room, cap).state)
         assertEquals(1, api.uploads) // resumed the existing job, no re-upload
+    }
+
+    @Test fun transientPollErrorsAreRetriedWithBackoff() = runTest {
+        val vm = vm()
+        api.jobQueue.add(JobStatus("j", JobState.TRAINING, 0.3f, "训练中"))
+        vm.start(room, cap); runCurrent()
+        assertEquals("training", repo.capture(room, cap).state)
+        api.failJobTimes(5, ApiException(ApiClient.MSG_UNREACHABLE))
+        advanceTimeBy(3.seconds); runCurrent() // poll 2 fails -> keep last state, back off 3 s
+        val rec = repo.capture(room, cap)
+        assertEquals("training", rec.state)
+        assertEquals(0.3f, rec.progress, 1e-6f)
+        assertEquals("网络暂时不可用，正在重试 (1/10)", rec.message)
+        assertEquals("训练中 30% · 网络暂时不可用，正在重试 (1/10)", captureStatusText(rec))
+        advanceTimeBy(3.seconds); runCurrent() // 2nd error, next backoff 6 s
+        assertEquals(3, api.polls)
+        advanceTimeBy(5.seconds); runCurrent()
+        assertEquals(3, api.polls) // still backing off
+        advanceTimeBy(1.seconds); runCurrent()
+        assertEquals(4, api.polls)
+        advanceUntilIdle()
+        val done = repo.capture(room, cap)
+        assertEquals("done", done.state)
+        assertNull(done.message)
+        assertEquals(1, api.uploads)
+    }
+
+    @Test fun tenConsecutivePollErrorsFailTheCapture() = runTest {
+        val vm = vm()
+        api.failJobTimes(MAX_POLL_ERRORS, ApiException(ApiClient.MSG_UNREACHABLE))
+        vm.start(room, cap); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state)
+        assertEquals(ApiClient.MSG_UNREACHABLE, rec.message)
+        assertEquals("j", rec.jobId)
+        assertEquals(MAX_POLL_ERRORS, api.polls)
+        assertEquals("重试", retryButtonLabel(rec))
+    }
+
+    @Test fun nineErrorsThenSuccessStillCompletes() = runTest {
+        val vm = vm()
+        api.failJobTimes(MAX_POLL_ERRORS - 1, ApiException(ApiClient.MSG_UNREACHABLE))
+        vm.start(room, cap); advanceUntilIdle()
+        assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    @Test fun unexpectedExceptionShowsFixedChineseMessage() = runTest {
+        val vm = vm()
+        api.jobThrow = IllegalStateException("internal detail")
+        vm.start(room, cap); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state)
+        assertEquals(MSG_UNEXPECTED, rec.message)
+        assertTrue(logged.any { it.message == "internal detail" })
+    }
+
+    @Test fun retryButtonLabelDependsOnJobId() {
+        val r = CaptureRecord(id = "c", zipPath = "z", state = "failed")
+        assertEquals("重新上传", retryButtonLabel(r))
+        assertEquals("重试", retryButtonLabel(r.copy(jobId = "j")))
     }
 
     @Test fun doneDownloadsSceneAndSetsScenePath() = runTest {

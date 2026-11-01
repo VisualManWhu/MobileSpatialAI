@@ -39,8 +39,10 @@ class CapturePackageWriter(
     fun addFrame(
         tNs: Long, jpeg: ByteArray, depthMm: ShortArray?, poseGl: FloatArray,
         fx: Float, fy: Float, cx: Float, cy: Float,
+        depthIntrinsics: FloatArray? = null,
     ) {
         require(poseGl.size == 16) { "pose must have 16 floats" }
+        require(depthIntrinsics == null || depthIntrinsics.size == 4) { "depthIntrinsics must be [fx, fy, cx, cy]" }
         val index = ++count
         val name = "%06d".format(index)
         val imageRel = "images/$name.jpg"
@@ -58,6 +60,11 @@ class CapturePackageWriter(
             put("depth", depthRel?.let { JsonPrimitive(it) } ?: JsonNull)
             put("pose", JsonArray(poseGl.map { JsonPrimitive(it) }))
             put("fx", fx); put("fy", fy); put("cx", cx); put("cy", cy)
+            // Optional (format v1): depth-image intrinsics, written only when this frame has depth.
+            if (depthRel != null && depthIntrinsics != null) {
+                put("depth_fx", depthIntrinsics[0]); put("depth_fy", depthIntrinsics[1])
+                put("depth_cx", depthIntrinsics[2]); put("depth_cy", depthIntrinsics[3])
+            }
         }
         framesFile.appendText(line.toString() + "\n")
     }

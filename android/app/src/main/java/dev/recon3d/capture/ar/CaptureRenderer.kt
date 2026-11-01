@@ -57,6 +57,13 @@ class CaptureRenderer(
     /** False while depth is enabled but its size is still unknown; recording may not start until true. */
     val depthReady: StateFlow<Boolean> = _depthReady
 
+    private val _depthFallback = MutableStateFlow(false)
+    /** True once depth was enabled but never became available within 10 s; frames are kept without depth. */
+    val depthFallback: StateFlow<Boolean> = _depthFallback
+
+    /** Pipeline for which the intrinsics were already logged (log once per capture). */
+    private var intrinsicsLoggedFor: CapturePipeline? = null
+
     /** GL thread only (use `queueEvent`). */
     fun skipStage() {
         guide.skipStage()
@@ -104,7 +111,10 @@ class CaptureRenderer(
             val p = pipeline
             if (!recording || !_depthReady.value || p == null) return
             if (selector.shouldKeep(t, pose, tracking) && p.hasRoom()) {
-                buildJob(frame, camera, t)?.let(p::submit)
+                buildJob(frame, camera, t, logIntrinsics = intrinsicsLoggedFor !== p)?.let {
+                    intrinsicsLoggedFor = p
+                    p.submit(it)
+                }
             }
         } catch (e: Exception) {
             // DeadlineExceeded / ResourceExhausted / IllegalState etc.: skip this frame, never crash the GL thread.
@@ -121,13 +131,14 @@ class CaptureRenderer(
             _depthReady.value = true
         } catch (_: NotYetAvailableException) {
             if (t - depthProbeStartNs > DEPTH_WAIT_NS) {
-                Log.w(TAG, "depth never became available; capturing without depth")
+                Log.w(TAG, "depth never became available within 10 s; capturing without depth")
+                _depthFallback.value = true
                 _depthReady.value = true
             }
         }
     }
 
-    private fun buildJob(frame: Frame, camera: Camera, t: Long): FrameJob? {
+    private fun buildJob(frame: Frame, camera: Camera, t: Long, logIntrinsics: Boolean): FrameJob? {
         val image = try {
             frame.acquireCameraImage()
         } catch (_: NotYetAvailableException) {
@@ -135,7 +146,7 @@ class CaptureRenderer(
         }
         val job = image.use { img ->
             val (yP, uP, vP) = img.planes
-            val depth = if (depthSize != null) acquireDepth(frame) else null
+            val depth = if (depthSize != null) acquireDepth(frame, camera) else null
             // Intrinsics are for imageIntrinsics.imageDimensions; scale to the actual CPU image (normally equal).
             val intr = camera.imageIntrinsics
             val dims = intr.imageDimensions
@@ -143,6 +154,7 @@ class CaptureRenderer(
             val sy = img.height.toFloat() / dims[1]
             val f = intr.focalLength
             val c = intr.principalPoint
+            if (logIntrinsics) logIntrinsicsOnce(img, intr.imageDimensions, f, c, camera, depth)
             FrameJob(
                 tNs = t, width = img.width, height = img.height,
                 y = yP.copyBytes(), yRowStride = yP.rowStride, yPixelStride = yP.pixelStride,
@@ -154,13 +166,33 @@ class CaptureRenderer(
         return job
     }
 
-    private fun acquireDepth(frame: Frame): DepthBytes? = try {
+    /**
+     * ARCore depth is aligned with the GPU texture (ruling R28), so its intrinsics are
+     * `camera.textureIntrinsics` scaled from textureIntrinsics.imageDimensions to the depth size.
+     */
+    private fun acquireDepth(frame: Frame, camera: Camera): DepthBytes? = try {
         frame.acquireDepthImage16Bits().use { d ->
             val p = d.planes[0]
-            DepthBytes(p.copyBytes(), d.width, d.height, p.rowStride)
+            val ti = camera.textureIntrinsics
+            val k = DepthIntrinsics.scaled(ti.focalLength, ti.principalPoint, ti.imageDimensions, d.width, d.height)
+            DepthBytes(p.copyBytes(), d.width, d.height, p.rowStride, k)
         }
     } catch (_: NotYetAvailableException) {
         null
+    }
+
+    private fun logIntrinsicsOnce(img: Image, imgDims: IntArray, f: FloatArray, c: FloatArray, camera: Camera, depth: DepthBytes?) {
+        val ti = camera.textureIntrinsics
+        val td = ti.imageDimensions
+        val tf = ti.focalLength
+        val tc = ti.principalPoint
+        Log.i(
+            TAG,
+            "intrinsics: cpuImage ${img.width}x${img.height}; imageIntrinsics dims ${imgDims[0]}x${imgDims[1]} " +
+                "f=(${f[0]}, ${f[1]}) c=(${c[0]}, ${c[1]}); textureIntrinsics dims ${td[0]}x${td[1]} " +
+                "f=(${tf[0]}, ${tf[1]}) c=(${tc[0]}, ${tc[1]}); depth " +
+                (depth?.let { "${it.width}x${it.height} k=${it.intrinsics?.joinToString()}" } ?: "none"),
+        )
     }
 
     private fun Image.Plane.copyBytes(): ByteArray {
