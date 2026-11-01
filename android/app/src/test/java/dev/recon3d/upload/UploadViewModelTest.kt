@@ -8,6 +8,7 @@ import dev.recon3d.net.JobStatus
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.RoomRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -15,6 +16,7 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertArrayEquals
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
@@ -22,6 +24,7 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.io.IOException
 import kotlin.time.Duration.Companion.seconds
 
 /** Scriptable [Api]: one-shot failures, a fixed or queued job status, fixed scene bytes. */
@@ -30,19 +33,26 @@ private class FakeApi : Api {
     var polls = 0
     private var uploadFailure: ApiException? = null
     private var jobFailure: ApiException? = null
+    private var downloadFailure: ApiException? = null
+    /** Virtual-time delay inside upload, to overlap calls. */
+    var uploadDelayMs = 0L
+    /** Progress values reported during upload. */
+    var progressSteps: List<Float> = listOf(0.5f, 1f)
     var jobResult: JobStatus = JobStatus("j", JobState.DONE, 1f, "完成")
     val jobQueue = ArrayDeque<JobStatus>()
     val sceneBytes = byteArrayOf(1, 2, 3, 4)
 
     fun failUploadOnce(e: ApiException) { uploadFailure = e }
     fun failJobOnce(e: ApiException) { jobFailure = e }
+    fun failDownloadOnce(e: ApiException) { downloadFailure = e }
 
     override suspend fun health() = Health("0.1.0", "gpu", "laptop")
 
     override suspend fun upload(zip: File, onProgress: (Float) -> Unit): String {
         uploads++
         uploadFailure?.let { uploadFailure = null; throw it }
-        onProgress(0.5f); onProgress(1f)
+        if (uploadDelayMs > 0) delay(uploadDelayMs)
+        progressSteps.forEach(onProgress)
         return "j"
     }
 
@@ -53,8 +63,25 @@ private class FakeApi : Api {
     }
 
     override suspend fun downloadScene(id: String, dest: File) {
+        downloadFailure?.let { downloadFailure = null; throw it }
         dest.parentFile?.mkdirs()
         dest.writeBytes(sceneBytes)
+    }
+}
+
+/** Counts progress writes; can throw once on the write that marks a record failed (disk full). */
+private class InstrumentedRepo(dir: File) : RoomRepository(dir) {
+    var throwOnFailedWrite = false
+    var uploadingWrites = 0
+
+    override fun editCapture(roomId: String, captureId: String, edit: (CaptureRecord) -> CaptureRecord) {
+        val next = edit(capture(roomId, captureId))
+        if (next.state == "failed" && throwOnFailedWrite) {
+            throwOnFailedWrite = false
+            throw IOException("No space left on device")
+        }
+        if (next.state == "uploading") uploadingWrites++
+        super.editCapture(roomId, captureId, edit)
     }
 }
 
@@ -63,20 +90,23 @@ class UploadViewModelTest {
     @get:Rule val tmp = TemporaryFolder()
 
     private val api = FakeApi()
-    private lateinit var repo: RoomRepository
+    private lateinit var repo: InstrumentedRepo
     private lateinit var scenesDir: File
     private lateinit var room: String
     private val cap = "cap-20261101-120000-000"
 
+    private val logged = mutableListOf<Throwable>()
+
     @Before fun setUp() {
-        repo = RoomRepository(tmp.root)
+        repo = InstrumentedRepo(tmp.root)
         scenesDir = File(tmp.root, "rooms")
         room = repo.createRoom("卧室").id
         val zip = File(tmp.root, "captures/$room/$cap.zip").apply { parentFile!!.mkdirs(); writeBytes(byteArrayOf(9)) }
         repo.addCapture(room, CaptureRecord(id = cap, zipPath = zip.path))
     }
 
-    private fun TestScope.vm() = UploadViewModel(api, repo, scenesDir, poll = 3.seconds, scope = this)
+    private fun TestScope.vm() =
+        UploadViewModel(api, repo, scenesDir, poll = 3.seconds, log = { _, e -> logged += e }, scope = this)
 
     @Test fun uploadFailureKeepsZipAndAllowsRetry() = runTest {
         val vm = vm()
@@ -180,6 +210,58 @@ class UploadViewModelTest {
         assertEquals("done", repo.capture(room, cap).state)
         assertEquals("failed", repo.capture(room, other).state)
         assertEquals(MSG_UPLOAD_INTERRUPTED, repo.capture(room, other).message)
+    }
+
+    @Test fun failureWhileRecordingFailureIsLoggedNotThrown() = runTest {
+        val vm = vm()
+        api.failUploadOnce(ApiException("连不上计算端，请检查 Wi-Fi 和地址"))
+        repo.throwOnFailedWrite = true
+        vm.start(room, cap); advanceUntilIdle() // runTest would rethrow an escaped exception
+        assertEquals(1, logged.size)
+        assertTrue(logged.single() is IOException)
+        assertFalse(vm.isRunning(room, cap))
+        // The coroutine finished, so the capture can be started again.
+        vm.start(room, cap); advanceUntilIdle()
+        assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    @Test fun downloadFailureKeepsJobIdAndRetryResumesWithoutReupload() = runTest {
+        val vm = vm()
+        api.failDownloadOnce(ApiException("连不上计算端，请检查 Wi-Fi 和地址"))
+        vm.start(room, cap); advanceUntilIdle()
+        val failed = repo.capture(room, cap)
+        assertEquals("failed", failed.state)
+        assertNull(failed.scenePath)
+        assertEquals("j", failed.jobId)
+
+        val pollsBefore = api.polls
+        vm.retry(room, cap); advanceUntilIdle()
+        val done = repo.capture(room, cap)
+        assertEquals(1, api.uploads)
+        assertTrue(api.polls > pollsBefore)
+        assertEquals("done", done.state)
+        assertEquals(File(scenesDir, "$room/$cap/scene.splat").path, done.scenePath)
+    }
+
+    @Test fun concurrentStartsUploadOnce() = runTest {
+        val vm = vm()
+        api.uploadDelayMs = 1_000
+        vm.start(room, cap); runCurrent() // first upload now suspended mid-transfer
+        assertTrue(vm.isRunning(room, cap))
+        vm.start(room, cap)
+        vm.retry(room, cap)
+        advanceUntilIdle()
+        assertEquals(1, api.uploads)
+        assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    @Test fun uploadProgressPersistedOnlyOnWholePercentChange() = runTest {
+        val vm = vm()
+        api.progressSteps = (1..1000).map { it / 1000f } // 1000 callbacks, 100 distinct percents
+        vm.start(room, cap); advanceUntilIdle()
+        // 1 write entering "uploading" + one per percent 1..100.
+        assertEquals(101, repo.uploadingWrites)
+        assertEquals("done", repo.capture(room, cap).state)
     }
 
     @Test fun statusTextIsChinese() {

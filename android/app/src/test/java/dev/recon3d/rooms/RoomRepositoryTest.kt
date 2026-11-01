@@ -7,6 +7,8 @@ import org.junit.Rule
 import org.junit.Test
 import org.junit.rules.TemporaryFolder
 import java.io.File
+import java.util.concurrent.CountDownLatch
+import kotlin.concurrent.thread
 
 class RoomRepositoryTest {
     @get:Rule val tmp = TemporaryFolder()
@@ -39,6 +41,24 @@ class RoomRepositoryTest {
     @Test fun flowEmitsCurrentRooms() {
         repo.createRoom("厨房")
         assertEquals(listOf("厨房"), repo.rooms().value.map { it.name })
+    }
+
+    @Test fun concurrentEditCaptureLosesNoUpdates() {
+        val room = repo.createRoom("客厅")
+        val ids = listOf("cap-a", "cap-b")
+        ids.forEach { repo.addCapture(room.id, CaptureRecord(id = it, zipPath = "/x/$it.zip")) }
+        val start = CountDownLatch(1)
+        val threads = ids.map { id ->
+            thread {
+                start.await()
+                repeat(50) { repo.editCapture(room.id, id) { it.copy(progress = it.progress + 1f) } }
+            }
+        }
+        start.countDown()
+        threads.forEach { it.join() }
+
+        ids.forEach { assertEquals(50f, repo.capture(room.id, it).progress, 0f) }
+        ids.forEach { assertEquals(50f, RoomRepository(dir).capture(room.id, it).progress, 0f) }
     }
 
     @Test fun corruptFileStartsEmptyAndIsKeptAside() {

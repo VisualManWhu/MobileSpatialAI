@@ -20,7 +20,9 @@ import dev.recon3d.net.ApiException
 import dev.recon3d.net.JobState
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.RoomRepository
+import android.util.Log
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -50,9 +52,18 @@ class UploadViewModel(
     private val repo: RoomRepository,
     private val scenesDir: File,
     private val poll: Duration = 3.seconds,
-    private val scope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+    /** Last-resort error log (injectable: `android.util.Log` is not available in JVM tests). */
+    private val log: (String, Throwable) -> Unit = { msg, e -> Log.e(TAG, msg, e) },
+    private val scope: CoroutineScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.Default +
+            CoroutineExceptionHandler { _, e -> log("uploader coroutine crashed", e) },
+    ),
 ) {
     private val running = mutableMapOf<String, Job>()
+
+    /** True while an upload/poll coroutine for this capture is active. */
+    fun isRunning(roomId: String, captureId: String): Boolean =
+        synchronized(running) { running["$roomId/$captureId"]?.isActive == true }
 
     /** Uploads the capture's zip and tracks the resulting job. No-op if it is already running. */
     fun start(roomId: String, captureId: String) = launchOnce(roomId, captureId) {
@@ -118,8 +129,21 @@ class UploadViewModel(
         repo.editCapture(roomId, captureId) {
             it.copy(state = "uploading", progress = 0f, message = null, jobId = null, scenePath = null)
         }
+        // Persist only when the whole percent changes, whatever the client's callback rate.
+        var lastPercent = 0
         val jobId = api.upload(zip) { p ->
-            repo.editCapture(roomId, captureId) { if (it.state == "uploading") it.copy(progress = p) else it }
+            val percent = (p.coerceIn(0f, 1f) * 100).toInt()
+            if (percent != lastPercent) {
+                lastPercent = percent
+                // Runs on OkHttp's writer thread: a throw here would escape OkHttp, so only log.
+                try {
+                    repo.editCapture(roomId, captureId) {
+                        if (it.state == "uploading") it.copy(progress = percent / 100f) else it
+                    }
+                } catch (e: Exception) {
+                    log("could not record upload progress for $roomId/$captureId", e)
+                }
+            }
         }
         repo.editCapture(roomId, captureId) { it.copy(state = "queued", jobId = jobId, progress = 0f, message = null) }
         return jobId
@@ -153,13 +177,19 @@ class UploadViewModel(
         }
     }
 
+    /** Marks the record failed; never throws (a failing disk must not crash the app from here). */
     private fun fail(roomId: String, captureId: String, message: String, jobGone: Boolean) {
-        repo.editCapture(roomId, captureId) {
-            it.copy(state = "failed", message = message, jobId = if (jobGone) null else it.jobId)
+        try {
+            repo.editCapture(roomId, captureId) {
+                it.copy(state = "failed", message = message, jobId = if (jobGone) null else it.jobId)
+            }
+        } catch (e: Exception) {
+            log("could not record failure for $roomId/$captureId: $message", e)
         }
     }
 
     private companion object {
+        const val TAG = "UploadViewModel"
         val ACTIVE = setOf("queued", "training", "exporting")
     }
 }

@@ -44,7 +44,7 @@ data class CaptureRecord(
  * Rooms + capture records, persisted as `filesDir/rooms.json` (written to a temp file, then
  * atomically renamed over the old one). Plain JVM; all mutations are serialized on this object.
  */
-class RoomRepository(
+open class RoomRepository(
     private val filesDir: File,
     private val clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -72,7 +72,7 @@ class RoomRepository(
     }
 
     /** Read-modify-write of one record under the lock, so concurrent updates don't clobber each other. */
-    fun editCapture(roomId: String, captureId: String, edit: (CaptureRecord) -> CaptureRecord) = mutateRoom(roomId) { room ->
+    open fun editCapture(roomId: String, captureId: String, edit: (CaptureRecord) -> CaptureRecord) = mutateRoom(roomId) { room ->
         require(room.captures.any { it.id == captureId }) { "no capture $captureId in $roomId" }
         room.copy(captures = room.captures.map { if (it.id == captureId) edit(it) else it })
     }
