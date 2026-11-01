@@ -33,7 +33,11 @@ object ImageConvert {
         return out
     }
 
-    /** DEPTH16 little-endian plane → millimetres; the top 3 (confidence) bits are masked off (`and 0x1FFF`). */
+    /**
+     * `Frame.acquireDepthImage16Bits()` plane (little-endian uint16, full 0..65535 mm range; confidence is a
+     * separate image) → millimetres, honouring the row stride. Values are kept as the raw uint16 bit pattern
+     * in a Short (Png16 writes them unsigned).
+     */
     fun depth16ToMm(data: ByteArray, width: Int, height: Int, rowStrideBytes: Int): ShortArray {
         val out = ShortArray(width * height)
         for (r in 0 until height) {
@@ -41,7 +45,7 @@ object ImageConvert {
             for (c in 0 until width) {
                 val i = base + c * 2
                 val raw = (data[i].toInt() and 0xff) or ((data[i + 1].toInt() and 0xff) shl 8)
-                out[r * width + c] = (raw and 0x1FFF).toShort()
+                out[r * width + c] = raw.toShort()
             }
         }
         return out

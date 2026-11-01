@@ -122,7 +122,7 @@ private class ArHost(private val activity: Activity, private val roomId: String)
     var error by mutableStateOf<String?>(null)
     var renderer by mutableStateOf<CaptureRenderer?>(null)
         private set
-    var pipeline: CapturePipeline? = null
+    var pipeline by mutableStateOf<CapturePipeline?>(null)
         private set
     var glView: GLSurfaceView? = null
     private var session: Session? = null
@@ -139,6 +139,7 @@ private class ArHost(private val activity: Activity, private val roomId: String)
             return
         }
         resumed = true
+        error = null // recover from a transient CameraNotAvailableException
         glView?.onResume()
     }
 
@@ -157,13 +158,36 @@ private class ArHost(private val activity: Activity, private val roomId: String)
         if (!finished) pipeline?.abandon()
     }
 
-    /** Finishes recording; null when nothing was captured (the session keeps running). */
-    suspend fun finish(): File? {
-        val p = pipeline ?: return null
-        val r = renderer ?: return null
-        if (!p.hasFrames()) return null
+    /**
+     * Finishes recording. [FinishResult.NoFrames] leaves the capture running; on failure the broken pipeline
+     * is discarded and replaced by a fresh one, so the user can record again.
+     */
+    suspend fun finish(): FinishResult {
+        val p = pipeline ?: return FinishResult.NoFrames
+        val r = renderer ?: return FinishResult.NoFrames
+        if (!p.hasFrames()) return FinishResult.NoFrames
         r.recording = false
-        return p.finish().also { finished = it != null } // on failure, close() still cleans up via abandon()
+        val zip = try {
+            p.finish()
+        } catch (e: Exception) {
+            Log.e(TAG, "finish failed", e)
+            null
+        }
+        if (zip != null) {
+            finished = true
+            return FinishResult.Saved(zip)
+        }
+        p.abandon()
+        val fresh = newPipeline(r)
+        pipeline = fresh
+        r.pipeline = fresh
+        return FinishResult.Failed
+    }
+
+    private fun newPipeline(r: CaptureRenderer): CapturePipeline {
+        val captureId = "cap-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS"))
+        val staging = File(activity.filesDir, "captures/$roomId/$captureId")
+        return CapturePipeline(staging, roomId, captureId, Build.MODEL, depthSize = { r.depthSize })
     }
 
     private fun createSession(): Boolean {
@@ -174,13 +198,13 @@ private class ArHost(private val activity: Activity, private val roomId: String)
             }
             val s = Session(activity)
             val setup = ArSessionHelper.configure(s)
-            val captureId = "cap-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
-            val staging = File(activity.filesDir, "captures/$roomId/$captureId")
-            val p = CapturePipeline(staging, roomId, captureId, Build.MODEL, setup.depthEnabled)
             Log.i(TAG, "AR ready: image ${setup.imageW}x${setup.imageH}, depth=${setup.depthEnabled}")
+            val r = CaptureRenderer(activity.assets, s, setup.depthEnabled) { activity.display?.rotation ?: 0 }
+            val p = newPipeline(r)
+            r.pipeline = p
             session = s
             pipeline = p
-            renderer = CaptureRenderer(activity.assets, s, p, setup.depthEnabled) { activity.display?.rotation ?: 0 }
+            renderer = r
             return true
         } catch (e: UnavailableException) {
             error = arcoreErrorZh(e)
@@ -194,6 +218,12 @@ private class ArHost(private val activity: Activity, private val roomId: String)
     private companion object {
         const val TAG = "CaptureScreen"
     }
+}
+
+private sealed interface FinishResult {
+    data class Saved(val zip: File) : FinishResult
+    data object NoFrames : FinishResult
+    data object Failed : FinishResult
 }
 
 private fun arcoreErrorZh(e: UnavailableException): String = when (e) {
@@ -238,10 +268,13 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
         return
     }
 
-    val pipeline = host.pipeline!!
-    val ui by renderer.ui.collectAsState()
+    val pipeline = host.pipeline ?: return
+    val guideUi by renderer.ui.collectAsState()
+    val depthReady by renderer.depthReady.collectAsState()
+    val ui = if (depthReady) guideUi else guideUi.copy(subHint = "正在等待深度传感器…")
     val kept by pipeline.kept.collectAsState()
     val dropped by pipeline.dropped.collectAsState()
+    val failed by pipeline.failed.collectAsState()
     var recording by remember { mutableStateOf(false) }
     var finishing by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
@@ -268,8 +301,13 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
             recording = recording,
             kept = kept,
             dropped = dropped,
+            failed = failed,
             message = message,
             onRecord = {
+                if (!recording && !depthReady) {
+                    message = "正在等待深度传感器，请稍候"
+                    return@CaptureOverlay
+                }
                 recording = !recording
                 renderer.recording = recording
                 message = null
@@ -280,11 +318,13 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
                 finishing = true
                 scope.launch {
                     try {
-                        val zip = host.finish()
-                        if (zip == null) {
-                            message = "还没有拍到画面，请先点红色按钮开始拍摄"
-                        } else {
-                            onFinished(zip)
+                        when (val r = host.finish()) {
+                            is FinishResult.Saved -> onFinished(r.zip)
+                            FinishResult.NoFrames -> message = "还没有拍到画面，请先点红色按钮开始拍摄"
+                            FinishResult.Failed -> {
+                                recording = false
+                                message = "保存失败，请返回重拍（已重置，可重新点红色按钮拍摄）"
+                            }
                         }
                     } catch (e: Exception) {
                         Log.e("CaptureScreen", "finish failed", e)
@@ -312,6 +352,7 @@ private fun CaptureOverlay(
     recording: Boolean,
     kept: Int,
     dropped: Int,
+    failed: Int,
     message: String?,
     onRecord: () -> Unit,
     onSkip: () -> Unit,
@@ -374,7 +415,7 @@ private fun CaptureOverlay(
             }
             val status = when {
                 message != null -> message
-                recording -> "录制中 · 已拍 $kept 张" + if (dropped > 0) "（丢弃 $dropped）" else ""
+                recording -> "录制中 · 已拍 $kept 张" + lossNote(dropped, failed)
                 kept > 0 -> "已暂停 · 已拍 $kept 张"
                 else -> "点红色按钮开始拍摄"
             }
@@ -448,6 +489,14 @@ private fun BigArrow(degrees: Float, modifier: Modifier) {
         drawPath(path, Color.White.copy(alpha = 0.9f))
         drawPath(path, Blue, style = Stroke(width = 4.dp.toPx()))
     }
+}
+
+private fun lossNote(dropped: Int, failed: Int): String {
+    val parts = listOfNotNull(
+        "丢弃 $dropped".takeIf { dropped > 0 },
+        "失败 $failed".takeIf { failed > 0 },
+    )
+    return if (parts.isEmpty()) "" else parts.joinToString("，", "（", "）")
 }
 
 internal fun arrowDegrees(a: Arrow): Float = when (a) {

@@ -27,7 +27,6 @@ import javax.microedition.khronos.opengles.GL10
 class CaptureRenderer(
     private val assets: AssetManager,
     private val session: Session,
-    private val pipeline: CapturePipeline,
     private val depthEnabled: Boolean,
     private val displayRotation: () -> Int,
 ) : GLSurfaceView.Renderer {
@@ -39,13 +38,24 @@ class CaptureRenderer(
     private var viewW = 0
     private var viewH = 0
     private var geometryDirty = false
-    private var depthProbeCountdown = 0
+    private var depthProbeStartNs = 0L
 
     private val _ui = MutableStateFlow(guide.last)
     val ui: StateFlow<GuideUi> = _ui
 
-    /** Set from the UI thread; frames are only kept while true. */
+    /** Where keyframes go; swapped by the host when a capture is reset. */
+    @Volatile var pipeline: CapturePipeline? = null
+
+    /** Set from the UI thread; frames are only kept while true (and [depthReady]). */
     @Volatile var recording = false
+
+    /** Depth image size `[w, h]` for this session; null if depth is disabled or never became available. */
+    @Volatile var depthSize: IntArray? = null
+        private set
+
+    private val _depthReady = MutableStateFlow(!depthEnabled)
+    /** False while depth is enabled but its size is still unknown; recording may not start until true. */
+    val depthReady: StateFlow<Boolean> = _depthReady
 
     /** GL thread only (use `queueEvent`). */
     fun skipStage() {
@@ -89,22 +99,31 @@ class CaptureRenderer(
         camera.pose.toMatrix(pose, 0) // world_from_camera, column-major, OpenGL convention
         _ui.value = guide.onFrame(t, pose, tracking)
 
-        if (!recording) {
-            probeDepthSize(frame)
-            return
-        }
-        if (selector.shouldKeep(t, pose, tracking) && pipeline.hasRoom()) {
-            buildJob(frame, camera, t)?.let(pipeline::submit)
+        try {
+            if (!_depthReady.value && tracking) probeDepthSize(frame, t)
+            val p = pipeline
+            if (!recording || !_depthReady.value || p == null) return
+            if (selector.shouldKeep(t, pose, tracking) && p.hasRoom()) {
+                buildJob(frame, camera, t)?.let(p::submit)
+            }
+        } catch (e: Exception) {
+            // DeadlineExceeded / ResourceExhausted / IllegalState etc.: skip this frame, never crash the GL thread.
+            Log.w(TAG, "frame $t skipped", e)
         }
     }
 
-    /** Before recording starts, learn the depth image size so the writer can be created with it. */
-    private fun probeDepthSize(frame: Frame) {
-        if (!depthEnabled || pipeline.knownDepthSize != null || --depthProbeCountdown > 0) return
-        depthProbeCountdown = 30
+    /** Every frame until known: learn the depth size so the writer is created with it (gives up after 10 s). */
+    private fun probeDepthSize(frame: Frame, t: Long) {
+        if (depthProbeStartNs == 0L) depthProbeStartNs = t
         try {
-            frame.acquireDepthImage16Bits().use { pipeline.knownDepthSize = intArrayOf(it.width, it.height) }
+            frame.acquireDepthImage16Bits().use { depthSize = intArrayOf(it.width, it.height) }
+            Log.i(TAG, "depth ready: ${depthSize!![0]}x${depthSize!![1]}")
+            _depthReady.value = true
         } catch (_: NotYetAvailableException) {
+            if (t - depthProbeStartNs > DEPTH_WAIT_NS) {
+                Log.w(TAG, "depth never became available; capturing without depth")
+                _depthReady.value = true
+            }
         }
     }
 
@@ -116,7 +135,7 @@ class CaptureRenderer(
         }
         val job = image.use { img ->
             val (yP, uP, vP) = img.planes
-            val depth = if (depthEnabled) acquireDepth(frame) else null
+            val depth = if (depthSize != null) acquireDepth(frame) else null
             // Intrinsics are for imageIntrinsics.imageDimensions; scale to the actual CPU image (normally equal).
             val intr = camera.imageIntrinsics
             val dims = intr.imageDimensions
@@ -138,9 +157,7 @@ class CaptureRenderer(
     private fun acquireDepth(frame: Frame): DepthBytes? = try {
         frame.acquireDepthImage16Bits().use { d ->
             val p = d.planes[0]
-            DepthBytes(p.copyBytes(), d.width, d.height, p.rowStride).also {
-                if (pipeline.knownDepthSize == null) pipeline.knownDepthSize = intArrayOf(d.width, d.height)
-            }
+            DepthBytes(p.copyBytes(), d.width, d.height, p.rowStride)
         }
     } catch (_: NotYetAvailableException) {
         null
@@ -154,5 +171,6 @@ class CaptureRenderer(
 
     private companion object {
         const val TAG = "CaptureRenderer"
+        const val DEPTH_WAIT_NS = 10_000_000_000L
     }
 }

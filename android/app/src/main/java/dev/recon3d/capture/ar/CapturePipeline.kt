@@ -6,6 +6,7 @@ import android.graphics.YuvImage
 import android.util.Log
 import dev.recon3d.capture.CapturePackageWriter
 import dev.recon3d.capture.ImageConvert
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -34,28 +35,31 @@ class DepthBytes(val data: ByteArray, val width: Int, val height: Int, val rowSt
 
 /**
  * Bounded keyframe queue (max [MAX_PENDING] jobs) consumed by ONE IO coroutine that does YUV→JPEG and
- * [CapturePackageWriter.addFrame]. The writer is created lazily on the first job, so its depth size comes
- * from the first depth image seen ([knownDepthSize], may be probed before recording starts).
+ * [CapturePackageWriter.addFrame]. The writer is created lazily on the first job with depth size
+ * [depthSize] (null → no depth for this capture). A job that throws is logged, counted in [failed] and
+ * skipped; the capture continues.
  */
 class CapturePipeline(
     private val stagingDir: File,
     private val roomId: String,
     private val captureId: String,
     private val device: String,
-    private val depthEnabled: Boolean,
+    private val depthSize: () -> IntArray?,
+    private val encodeJpeg: (FrameJob) -> ByteArray = ::yuvJobToJpeg,
+    private val log: (String, Throwable?) -> Unit = { m, e -> Log.w(TAG, m, e) },
 ) {
     private val queue = Channel<FrameJob>(Channel.UNLIMITED)
     private val pending = AtomicInteger(0)
     private val _kept = MutableStateFlow(0)
     private val _dropped = MutableStateFlow(0)
+    private val _failed = MutableStateFlow(0)
 
     /** Frames written so far. */
     val kept: StateFlow<Int> = _kept
     /** Keyframes dropped because the queue was full. */
     val dropped: StateFlow<Int> = _dropped
-
-    /** Depth image size `[w, h]` seen on the GL thread (null until one arrives, or depth disabled). */
-    @Volatile var knownDepthSize: IntArray? = null
+    /** Keyframes whose conversion / write threw (skipped). */
+    val failed: StateFlow<Int> = _failed
 
     @OptIn(ExperimentalCoroutinesApi::class)
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO.limitedParallelism(1))
@@ -67,7 +71,7 @@ class CapturePipeline(
         for (job in queue) {
             try {
                 val w = writer ?: run {
-                    val d = job.depth?.let { intArrayOf(it.width, it.height) } ?: knownDepthSize.takeIf { depthEnabled }
+                    val d = depthSize()
                     depthW = d?.get(0); depthH = d?.get(1)
                     stagingDir.mkdirs()
                     CapturePackageWriter(
@@ -75,11 +79,16 @@ class CapturePipeline(
                         imageW = job.width, imageH = job.height, depthW = depthW, depthH = depthH, device = device,
                     ).also { writer = it }
                 }
-                val jpeg = toJpeg(job)
+                val jpeg = encodeJpeg(job)
                 val depth = job.depth?.takeIf { it.width == depthW && it.height == depthH }
                     ?.let { ImageConvert.depth16ToMm(it.data, it.width, it.height, it.rowStrideBytes) }
                 w.addFrame(job.tNs, jpeg, depth, job.pose, job.fx, job.fy, job.cx, job.cy)
                 _kept.value++
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _failed.value++
+                log("keyframe t=${job.tNs} failed, skipped (failed=${_failed.value})", e)
             } finally {
                 pending.decrementAndGet()
             }
@@ -91,7 +100,7 @@ class CapturePipeline(
     fun hasRoom(): Boolean {
         if (pending.get() < MAX_PENDING) return true
         _dropped.value++
-        Log.w(TAG, "keyframe dropped, queue full (dropped=${_dropped.value})")
+        log("keyframe dropped, queue full (dropped=${_dropped.value})", null)
         return false
     }
 
@@ -119,20 +128,22 @@ class CapturePipeline(
         }
     }
 
-    private fun toJpeg(job: FrameJob): ByteArray {
-        val nv21 = ImageConvert.yuv420ToNv21(
-            job.width, job.height, job.y, job.yRowStride, job.yPixelStride,
-            job.u, job.v, job.uvRowStride, job.uvPixelStride,
-        )
-        val out = ByteArrayOutputStream(job.width * job.height / 4)
-        YuvImage(nv21, ImageFormat.NV21, job.width, job.height, null)
-            .compressToJpeg(Rect(0, 0, job.width, job.height), JPEG_QUALITY, out)
-        return out.toByteArray()
-    }
-
     private companion object {
         const val TAG = "CapturePipeline"
         const val MAX_PENDING = 8
-        const val JPEG_QUALITY = 90
     }
+}
+
+private const val JPEG_QUALITY = 90
+
+/** YUV_420_888 bytes → NV21 → JPEG (quality 90). Android-only (YuvImage). */
+fun yuvJobToJpeg(job: FrameJob): ByteArray {
+    val nv21 = ImageConvert.yuv420ToNv21(
+        job.width, job.height, job.y, job.yRowStride, job.yPixelStride,
+        job.u, job.v, job.uvRowStride, job.uvPixelStride,
+    )
+    val out = ByteArrayOutputStream(job.width * job.height / 4)
+    YuvImage(nv21, ImageFormat.NV21, job.width, job.height, null)
+        .compressToJpeg(Rect(0, 0, job.width, job.height), JPEG_QUALITY, out)
+    return out.toByteArray()
 }

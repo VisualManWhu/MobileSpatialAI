@@ -46,13 +46,13 @@ class ImageConvertTest {
         }
     }
 
-    @Test fun depth16MasksConfidenceBitsAndHonoursRowStride() {
-        // 2x2 depth, rowStride 6 bytes (2 bytes padding), little-endian.
+    @Test fun depth16KeepsFullUnsignedRangeAndHonoursRowStride() {
+        // 2x2 depth, rowStride 6 bytes (2 bytes padding), little-endian, full 16-bit millimetres.
         fun le(v: Int) = byteArrayOf((v and 0xff).toByte(), ((v shr 8) and 0xff).toByte())
-        val row0 = le(1000) + le(0xE000 or 8191) + byteArrayOf(9, 9)
-        val row1 = le(0) + le(0x2000 or 250)
+        val row0 = le(9000) + le(0xFFFF) + byteArrayOf(9, 9)
+        val row1 = le(0) + le(250)
         val mm = ImageConvert.depth16ToMm(row0 + row1, width = 2, height = 2, rowStrideBytes = 6)
-        assertArrayEquals(shortArrayOf(1000, 8191, 0, 250), mm)
+        assertEquals(listOf(9000, 65535, 0, 250), mm.map { it.toInt() and 0xFFFF })
     }
 
     @Test fun picksLargestCpuImageWithLongSideAtMost1920() {
