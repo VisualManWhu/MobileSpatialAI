@@ -61,6 +61,11 @@ def _safe_extract(zf: zipfile.ZipFile, dest: Path) -> None:
     zf.extractall(dest)
 
 
+def _inside(workdir: Path, rel: str) -> bool:
+    root = workdir.resolve()
+    return (root / rel).resolve().is_relative_to(root) and not Path(rel).is_absolute()
+
+
 def load_capture(zip_path: Path, workdir: Path) -> Capture:
     zip_path, workdir = Path(zip_path), Path(workdir)
     try:
@@ -96,6 +101,8 @@ def load_capture(zip_path: Path, workdir: Path) -> Capture:
             continue
         try:
             d = json.loads(line)
+            if not isinstance(d, dict):
+                raise ValueError("not an object")
             pose = np.array(d["pose"], dtype=np.float64)
             if pose.size != 16:
                 raise ValueError("pose")
@@ -110,6 +117,9 @@ def load_capture(zip_path: Path, workdir: Path) -> Capture:
         )
 
     for fr in frames:
+        for rel in (fr.image, fr.depth):
+            if rel is not None and not _inside(workdir, rel):
+                raise CaptureFormatError(f"帧文件路径非法: {rel}")
         if not (workdir / fr.image).is_file():
             raise CaptureFormatError(f"缺少图片: {fr.image}")
         if fr.depth is not None and not (workdir / fr.depth).is_file():
