@@ -112,7 +112,9 @@ def test_other_error_message_and_traceback_logged(store, make_worker):
     make_worker(pipe).start()
     j = store.create(io.BytesIO(b"a"))
     wait_until(lambda: store.get(j).state == "failed")
-    assert store.get(j).message == "重建失败：ValueError"
+    msg = store.get(j).message
+    assert msg == f"重建失败，请重新拍摄后上传；如仍失败，把服务端 data/jobs/{j}/log.txt 发给开发者"
+    assert "boom" not in msg and "ValueError" not in msg
     log = (store.job_dir(j) / "log.txt").read_text(encoding="utf-8")
     assert "Traceback" in log and "boom" in log
 

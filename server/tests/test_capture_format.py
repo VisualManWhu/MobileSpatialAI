@@ -79,3 +79,6 @@ def test_loads_android_package(tmp_path):
     assert abs(cap.frames[1].pose[0, 3] - 0.1) < 1e-6  # translation survives column-major round trip
     assert all(f.depth is not None for f in cap.frames)
     assert cap.manifest.depth_width == 8
+    # optional depth intrinsics (depth-image pixels) written by the Android writer
+    assert all(f.depth_fx == 6.5 and f.depth_fy == 6.5 for f in cap.frames)
+    assert all(f.depth_cx == 4.0 and f.depth_cy == 3.0 for f in cap.frames)

@@ -44,9 +44,14 @@ def init_points(
         if len(v) == 0:
             continue
         z = d[v, u]
-        K = Ks[i]
-        fx, fy = K[0, 0] * dw / W, K[1, 1] * dh / H
-        cx, cy = K[0, 2] * dw / W, K[1, 2] * dh / H
+        dK = ts.depth_K[i] if ts.depth_K is not None else None
+        if dK is not None:
+            dK = dK.detach().cpu().numpy().astype(np.float64)
+            fx, fy, cx, cy = dK[0, 0], dK[1, 1], dK[0, 2], dK[1, 2]
+        else:
+            K = Ks[i]
+            fx, fy = K[0, 0] * dw / W, K[1, 1] * dh / H
+            cx, cy = K[0, 2] * dw / W, K[1, 2] * dh / H
         # pixel-center convention is the same as ARCore intrinsics: use integer pixel coords
         x = (u - cx) / fx * z
         y = (v - cy) / fy * z

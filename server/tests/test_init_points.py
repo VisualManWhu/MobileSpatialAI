@@ -49,3 +49,21 @@ def test_invalid_and_far_dropped_and_padded():
     xyz, rgb = init_points(_ts([d, None]), voxel_size=0.05, min_points=500)
     assert xyz.shape == (500, 3)
     assert np.sum(np.isclose(rgb, 0.5).all(axis=1)) >= 1
+
+
+def test_depth_intrinsics_used_when_present(tmp_path):
+    from recon3d.capture.format import load_capture
+    from recon3d.config import PROFILES
+    from recon3d.recon.dataset import build_training_set
+    from tests.fixtures.make_capture import make_capture
+
+    # image 64x48 fx=50 -> scaled depth fx would be 6.25; depth intrinsics say 3.125
+    z = make_capture(tmp_path, n_frames=1, poses=[[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]],
+                     depth_intrinsics=(3.125, 3.125, 4.0, 3.0))
+    cap = load_capture(z, tmp_path / "w")
+    assert cap.frames[0].depth_fx == pytest.approx(3.125)
+    ts = build_training_set(cap, PROFILES["laptop"])
+    xyz, _ = init_points(ts, voxel_size=0.01, min_points=0)
+    assert np.allclose(xyz[:, 2], -1.5, atol=0.01)  # identity GL pose looks down -Z
+    # u in 0..7, cx=4, depth 1.5 m: x = (u-4)/3.125*1.5 -> min -1.92 (scaled K would give -0.96)
+    assert xyz[:, 0].min() == pytest.approx(-1.92, abs=0.02)

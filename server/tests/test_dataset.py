@@ -41,3 +41,24 @@ def test_profile_frozen_replace():
     assert p.iterations == 10 and PROFILES["laptop"].iterations == 15000
     with pytest.raises(dataclasses.FrozenInstanceError):
         PROFILES["server"].iterations = 1
+
+
+def test_depth_aspect_mismatch_without_intrinsics_skips(tmp_path, caplog):
+    import logging
+
+    d = np.full((9, 16), 1500, dtype=np.uint16)  # 16:9 depth vs 4:3 image
+    cap = load_capture(make_capture(tmp_path, n_frames=2, depths=[d, d]), tmp_path / "w")
+    with caplog.at_level(logging.WARNING):
+        ts = build_training_set(cap, PROFILES["laptop"])
+    assert all(x is None for x in ts.depths)
+    assert "aspect" in caplog.text
+
+
+def test_depth_aspect_mismatch_with_intrinsics_kept(tmp_path):
+    d = np.full((9, 16), 1500, dtype=np.uint16)
+    cap = load_capture(make_capture(tmp_path, depths=[d], n_frames=1,
+                                    depth_intrinsics=(12.0, 12.0, 8.0, 4.5)), tmp_path / "w")
+    ts = build_training_set(cap, PROFILES["laptop"])
+    assert ts.depths[0] is not None
+    assert ts.depth_K[0][0, 0] == pytest.approx(12.0)
+    assert ts.depth_K[0][1, 2] == pytest.approx(4.5)

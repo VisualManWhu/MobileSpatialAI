@@ -43,6 +43,12 @@ class Frame(BaseModel):
     fy: float
     cx: float
     cy: float
+    # Optional depth-image intrinsics (pixels of the depth image). ARCore depth aligns with
+    # the GPU texture, not necessarily the CPU image; absent = use image K scaled to depth.
+    depth_fx: float | None = None
+    depth_fy: float | None = None
+    depth_cx: float | None = None
+    depth_cy: float | None = None
 
 
 class Capture(BaseModel):

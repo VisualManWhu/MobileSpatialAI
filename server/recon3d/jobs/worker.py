@@ -24,12 +24,13 @@ def is_oom(e: BaseException) -> bool:
     return "out of memory" in str(e).lower()
 
 
-def failure_message(e: BaseException) -> str:
+def failure_message(e: BaseException, job_id: str) -> str:
+    """User-facing (Chinese) failure text. Never includes exception text; details go to log.txt."""
     if isinstance(e, CaptureFormatError):
         return e.message_zh
     if is_oom(e):
         return OOM_MESSAGE
-    return "重建失败：" + type(e).__name__
+    return f"重建失败，请重新拍摄后上传；如仍失败，把服务端 data/jobs/{job_id}/log.txt 发给开发者"
 
 
 class Worker:
@@ -81,6 +82,6 @@ class Worker:
             self.pipeline(store.job_dir(job_id), on_progress)
         except Exception as e:
             store.log(job_id, "pipeline failed:\n" + traceback.format_exc().rstrip())
-            store.update(job_id, state="failed", message=failure_message(e))
+            store.update(job_id, state="failed", message=failure_message(e, job_id))
         else:
             store.update(job_id, state="done", progress=1.0, message="完成")

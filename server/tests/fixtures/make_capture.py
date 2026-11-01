@@ -34,6 +34,7 @@ def make_capture(
     poses: list[list[float]] | None = None,
     images: list[np.ndarray] | None = None,
     depths: list[np.ndarray] | None = None,
+    depth_intrinsics: tuple[float, float, float, float] | None = None,
     name: str = "capture.zip",
 ) -> Path:
     """Write a capture zip into tmp_path and return its path.
@@ -45,6 +46,8 @@ def make_capture(
         image_width/height are taken from the first one.
     depths: optional list of uint16 HxW arrays in millimeters (one per frame); depth
         width/height are taken from the first one and with_depth is implied.
+    depth_intrinsics: optional (depth_fx, depth_fy, depth_cx, depth_cy) written on every
+        frame that has depth (in depth-image pixels).
     """
     if images is not None:
         image_height, image_width = images[0].shape[:2]
@@ -76,11 +79,14 @@ def make_capture(
             img_name = f"images/{i:06d}.jpg"
             depth_name = f"depth/{i:06d}.png" if with_depth else None
             pose = poses[i - 1] if poses is not None else _default_pose(i)
-            lines.append(json.dumps({
+            rec = {
                 "index": i, "t_ns": i * 33_000_000, "image": img_name,
                 "depth": depth_name, "pose": pose,
                 "fx": fx, "fy": fy, "cx": cx, "cy": cy,
-            }))
+            }
+            if with_depth and depth_intrinsics is not None:
+                rec.update(zip(("depth_fx", "depth_fy", "depth_cx", "depth_cy"), depth_intrinsics))
+            lines.append(json.dumps(rec))
             if drop_image != i:
                 buf = io.BytesIO()
                 if images is not None:
