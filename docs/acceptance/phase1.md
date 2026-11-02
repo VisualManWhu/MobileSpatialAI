@@ -50,6 +50,7 @@
 - [ ] 网络二选一：Wi-Fi 标记为"专用网络"，或使用 Tailscale
 - [ ] 防火墙放行 8765：Wi-Fi 方式用 `New-NetFirewallRule ... -Profile Private`；Tailscale 方式用 `-Profile Any -RemoteAddress 100.64.0.0/10`（只允许 Tailscale 设备）
 - [ ] Hyper-V 入站只放行 8765 端口：Wi-Fi 方式 `New-NetFirewallHyperVRule -Name Recon3D8765 ... -LocalPorts 8765`；Tailscale 方式 `-Name Recon3D8765TS ... -RemoteAddresses 100.64.0.0/10`（**不要**用整台 WSL 放行的 `Set-NetFirewallHyperVVMSetting ... -DefaultInboundAction Allow`）
+- [ ] 规则加好后运行 `wsl --shutdown`，再重启服务端（实测：不重启 WSL，Hyper-V 规则不生效）
 - 期望：`Get-NetFirewallHyperVRule -Name Recon3D8765`（或 `Recon3D8765TS`）显示 `LocalPorts : 8765`、`Action : Allow`
 - 撤销：`Remove-NetFirewallHyperVRule -Name Recon3D8765`；`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`（Tailscale 规则名为 `"Recon3D server 8765 Tailscale"`）
 

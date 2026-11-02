@@ -90,7 +90,13 @@ WSL 里的其他端口仍然被拦截（不要改成"整台 WSL 全部放行"，
 Get-NetFirewallHyperVRule -Name Recon3D8765
 ```
 
-能看到 `LocalPorts : 8765`、`Action : Allow`、`Enabled : True` 即可。想撤销，管理员 PowerShell 运行：
+能看到 `LocalPorts : 8765`、`Action : Allow`、`Enabled : True` 即可。
+
+**重要：规则加好后必须重启 WSL 才生效**（实测 2026-11-02：WSL 运行中新加的 Hyper-V 规则不会立即应用，手机仍然连不上）。
+在普通 PowerShell 运行 `wsl --shutdown`，然后重新打开 Ubuntu 终端、重新启动服务端（第 5 步）。
+另外，在笔记本自己的浏览器里用局域网 IP（如 `http://192.168.178.10:8765/...`）打不开是正常的，镜像模式不支持这种"自己绕回自己"的访问；用手机测，或者在笔记本上用 `http://127.0.0.1:8765/...`。
+
+想撤销，管理员 PowerShell 运行：
 
 ```powershell
 Remove-NetFirewallHyperVRule -Name Recon3D8765
