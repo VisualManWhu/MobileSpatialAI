@@ -11,6 +11,8 @@ class Profile:
     iterations: int
     max_gaussians: int
     sh_degree: int
+    depth_lambda: float = 0.05  # 0 disables the depth loss
+    pose_lr: float = 1e-4  # 0 disables per-camera pose refinement
 
 
 PROFILES: dict[str, Profile] = {

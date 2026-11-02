@@ -1,4 +1,5 @@
 import dataclasses
+import logging
 
 import pytest
 import torch
@@ -56,12 +57,67 @@ def test_respects_max_gaussians(synthetic_ts):
 def test_densification_growth_is_capped(synthetic_ts):
     # Sparse (8x subsampled) depth -> ~5.4k init points that densification grows
     # (to ~5.9k uncapped), so the cap must be enforced during training, not at init.
-    ts = dataclasses.replace(synthetic_ts[0], depths=[d[::8, ::8].contiguous() for d in synthetic_ts[0].depths])
+    ts = dataclasses.replace(
+        synthetic_ts[0],
+        depths=[d[::8, ::8].contiguous() for d in synthetic_ts[0].depths],
+        confs=[c[::8, ::8].contiguous() for c in synthetic_ts[0].confs],
+    )
     n_init = len(init_points(ts)[0])
     cap = n_init + 200
     p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=cap)
     n = train(ts, p, on_progress=lambda p: None).means.shape[0]
     assert n_init < n <= cap
+
+
+def test_depth_loss_pools_and_weights():
+    from recon3d.recon.trainer import depth_loss
+    rendered = torch.full((1, 6, 8), 2.0)
+    target = torch.full((3, 4), 2.0); target[0, 0] = 3.0   # 1 m error at one cell
+    conf = torch.ones(3, 4); conf[0, 1] = 0.0
+    l = depth_loss(rendered, target, conf, delta=0.1)
+    # Huber(1.0, 0.1) = 0.1*(1.0 - 0.05) = 0.095 ; mean over the 11 cells with conf>0
+    assert abs(float(l) - 0.095 / 11) < 1e-6
+
+
+def test_depth_loss_none_when_not_divisible():
+    from recon3d.recon.trainer import depth_loss
+    assert depth_loss(torch.zeros(1, 7, 8), torch.zeros(3, 4), torch.ones(3, 4)) is None
+
+
+@pytest.mark.gpu
+def test_trains_with_depth_loss_and_pose_refine(synthetic_ts, caplog):
+    # Depth at 1/4 image resolution so the loss exercises the avg-pool path.
+    tr = synthetic_ts[0]
+    ts = dataclasses.replace(
+        tr,
+        depths=[d[::4, ::4].contiguous() for d in tr.depths],
+        confs=[c[::4, ::4].contiguous() for c in tr.confs],
+    )
+    p = dataclasses.replace(PROFILES["laptop"], iterations=300, depth_lambda=0.05, pose_lr=1e-4)
+    with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
+        splats = train(ts, p, on_progress=lambda p: None)
+    assert splats.means.shape[0] > 0
+    assert any("位姿修正" in r.getMessage() for r in caplog.records)
+    legacy = dataclasses.replace(PROFILES["laptop"], iterations=300, depth_lambda=0.0, pose_lr=0.0)
+    assert train(ts, legacy, on_progress=lambda p: None).means.shape[0] > 0
+
+
+@pytest.mark.gpu
+def test_pose_refine_receives_gradients(synthetic_ts):
+    from recon3d.recon.pose_opt import PoseRefine
+    from recon3d.recon.trainer import _init_params, _rasterize
+
+    tr = synthetic_ts[0]
+    params = _init_params(tr, PROFILES["laptop"], "cuda")
+    pose = PoseRefine(len(tr.c2w), "cuda")
+    viewmats = torch.linalg.inv(tr.c2w)
+    H, W = tr.images.shape[1:3]
+    idx = torch.tensor([3], device="cuda")
+    out, _, _ = _rasterize(params, pose(viewmats[3:4], idx), tr.K[3:4], W, H, 0, render_mode="RGB+ED")
+    assert out.shape == (1, H, W, 4)
+    ((out[..., :3] - tr.images[3:4]).abs().mean() + out[..., 3].mean()).backward()
+    g = pose.delta.grad
+    assert g is not None and g[3].abs().sum() > 0 and g[0].abs().sum() == 0
 
 
 @pytest.mark.gpu
@@ -95,6 +151,7 @@ def test_image_stack_not_resident_on_gpu(synthetic_ts):
         K=tr.K.cpu().repeat(reps, 1, 1),
         c2w=tr.c2w.cpu().repeat(reps, 1, 1),
         depths=list(tr.depths) + [None] * (len(tr.depths) * (reps - 1)),
+        confs=list(tr.confs) + [None] * (len(tr.confs) * (reps - 1)),
     )
     stack_bytes = ts.images.numel() * 4
     p = dataclasses.replace(PROFILES["laptop"], iterations=200, max_gaussians=20000)

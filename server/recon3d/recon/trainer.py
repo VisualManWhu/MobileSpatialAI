@@ -5,6 +5,7 @@ CUDA OOM is deliberately not caught here; the caller decides how to degrade.
 """
 from __future__ import annotations
 
+import logging
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -16,6 +17,9 @@ import torch.nn.functional as F
 from recon3d.config import Profile
 from recon3d.recon.dataset import TrainingSet
 from recon3d.recon.init_points import init_points
+from recon3d.recon.pose_opt import PoseRefine
+
+log = logging.getLogger(__name__)
 
 SH_C0 = 0.28209479177387814
 PROGRESS_EVERY = 100
@@ -23,6 +27,8 @@ SH_DEGREE_INTERVAL = 1000
 SSIM_LAMBDA = 0.2
 PACKED = True  # packed projection: lower memory; the strategy must be told
 RESET_EVERY = 3000  # opacity reset period (upstream default)
+POSE_REG = 1e-2  # weight of the per-camera pose-correction penalty
+DEPTH_HUBER_DELTA = 0.1  # metres; ARCore depth noise is 5-20 cm
 
 
 @dataclass
@@ -45,7 +51,7 @@ class Splats:
         return int(round(math.sqrt(self.shN.shape[1] + 1))) - 1
 
 
-def _rasterize(params, viewmats, Ks, W, H, sh_degree):
+def _rasterize(params, viewmats, Ks, W, H, sh_degree, render_mode: str = "RGB"):
     from gsplat import rasterization
 
     colors = torch.cat([params["sh0"], params["shN"]], dim=1)
@@ -61,6 +67,7 @@ def _rasterize(params, viewmats, Ks, W, H, sh_degree):
         height=H,
         sh_degree=sh_degree,
         packed=PACKED,
+        render_mode=render_mode,
     )
 
 
@@ -101,6 +108,38 @@ def ssim(a: torch.Tensor, b: torch.Tensor, window: torch.Tensor) -> torch.Tensor
     num = (2 * mu_a * mu_b + c1) * (2 * s_ab + c2)
     den = (mu_a**2 + mu_b**2 + c1) * (s_aa + s_bb + c2)
     return (num / den).mean()
+
+
+def depth_loss(
+    rendered: torch.Tensor, target: torch.Tensor, conf: torch.Tensor, delta: float = DEPTH_HUBER_DELTA
+) -> torch.Tensor | None:
+    """Huber(|pooled(rendered) - target|, delta) weighted by conf, mean over conf>0.
+
+    rendered [1,H,W] expected depth is average-pooled down to the depth map's [dh,dw].
+    None if H % dh or W % dw != 0, or if no cell has conf > 0.
+    """
+    H, W = rendered.shape[-2:]
+    dh, dw = target.shape
+    if H % dh or W % dw:
+        return None
+    n = (conf > 0).sum()
+    if n == 0:
+        return None
+    pooled = F.avg_pool2d(rendered[None], kernel_size=(H // dh, W // dw))[0, 0]
+    h = F.huber_loss(pooled, target, reduction="none", delta=delta)
+    return (conf * h).sum() / n
+
+
+def _log_pose_stats(pose: PoseRefine | None) -> None:
+    if pose is None:
+        return
+    d = pose.delta.detach()
+    rot = torch.rad2deg(d[:, :3].norm(dim=1))
+    trans = d[:, 3:].norm(dim=1) * 100.0
+    log.info(
+        "位姿修正：旋转 中位数 %.3f° / 最大 %.3f°，平移 中位数 %.2f cm / 最大 %.2f cm",
+        float(rot.median()), float(rot.max()), float(trans.median()), float(trans.max()),
+    )
 
 
 def _knn_mean_sq_dist(xyz: np.ndarray, k: int = 3) -> np.ndarray:
@@ -206,17 +245,38 @@ def train(
     state = strategy.initialize_state(scene_scale=scene_scale)
     window = _gaussian_window(device=device)
     gen = torch.Generator().manual_seed(0)
+    use_depth = profile.depth_lambda > 0
+    render_mode = "RGB+ED" if use_depth else "RGB"
+    # Pose refinement starts with densification, once the initial cloud has settled.
+    pose: PoseRefine | None = None
+    pose_opt = None
 
     for step in range(iters):
+        if pose is None and profile.pose_lr > 0 and step >= strategy.refine_start_iter:
+            pose = PoseRefine(n_img, device)
+            pose_opt = torch.optim.Adam(pose.parameters(), lr=profile.pose_lr)
         i = int(torch.randint(n_img, (1,), generator=gen))
         sh_deg = min(step // SH_DEGREE_INTERVAL, profile.sh_degree)
-        img, _, info = _rasterize(params, viewmats[i : i + 1], Ks[i : i + 1], W, H, sh_deg)
+        vm = viewmats[i : i + 1]
+        if pose is not None:
+            vm = pose(vm, torch.tensor([i], device=device))
+        out, _, info = _rasterize(params, vm, Ks[i : i + 1], W, H, sh_deg, render_mode)
+        img = out[..., :3]
         gt = images[i : i + 1].to(device, non_blocking=True)
         strategy.step_pre_backward(params, optimizers, state, step, info)
         l1 = (img - gt).abs().mean()
         ssim_v = ssim(img.permute(0, 3, 1, 2), gt.permute(0, 3, 1, 2), window)
         loss = (1.0 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * (1.0 - ssim_v)
+        if use_depth and ts.depths[i] is not None and ts.confs[i] is not None:
+            dl = depth_loss(out[..., 3], ts.depths[i].to(device), ts.confs[i].to(device))
+            if dl is not None:
+                loss = loss + profile.depth_lambda * dl
+        if pose is not None:
+            loss = loss + POSE_REG * pose.reg()
         loss.backward()
+        if pose_opt is not None:
+            pose_opt.step()
+            pose_opt.zero_grad(set_to_none=True)
         # Same order as upstream simple_trainer: optimizer step first, then the
         # strategy (grow/prune) on the updated params.
         for opt in optimizers.values():
@@ -234,4 +294,5 @@ def train(
         if (step + 1) % PROGRESS_EVERY == 0 or step + 1 == iters:
             on_progress((step + 1) / iters)
 
+    _log_pose_stats(pose)
     return Splats(**{k: v.detach() for k, v in params.items()})
