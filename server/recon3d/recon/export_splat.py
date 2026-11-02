@@ -79,3 +79,41 @@ def export_ply(splats: Splats, path: Path) -> int:
         f.write(header.encode("ascii"))
         f.write(np.ascontiguousarray(data).tobytes())
     return n
+
+
+def load_ply(path: Path, device: str = "cpu") -> Splats:
+    """Inverse of export_ply: read a 3DGS binary PLY back into raw Splats parameters."""
+    raw = Path(path).read_bytes()
+    end = raw.index(b"end_header\n") + len(b"end_header\n")
+    lines = raw[:end].decode("ascii").splitlines()
+    if lines[:2] != ["ply", "format binary_little_endian 1.0"]:
+        raise ValueError(f"{path}: not a binary little-endian PLY")
+    n = next(int(l.split()[2]) for l in lines if l.startswith("element vertex "))
+    names = []
+    for l in lines:
+        if l.startswith("property "):
+            parts = l.split()
+            if parts[1] != "float":
+                raise ValueError(f"{path}: unsupported property type {parts[1]!r}")
+            names.append(parts[2])
+    col = {nm: i for i, nm in enumerate(names)}
+    data = np.frombuffer(raw, "<f4", count=n * len(names), offset=end).reshape(n, len(names))
+
+    def cols(*nms: str) -> np.ndarray:
+        return data[:, [col[nm] for nm in nms]]
+
+    n_rest = sum(nm.startswith("f_rest_") for nm in names)
+    k = n_rest // 3
+    rest = cols(*(f"f_rest_{i}" for i in range(n_rest))).reshape(n, 3, k).transpose(0, 2, 1)
+
+    def t(a: np.ndarray) -> torch.Tensor:
+        return torch.from_numpy(np.array(a, dtype=np.float32)).to(device)  # copy: buffer is read-only
+
+    return Splats(
+        means=t(cols("x", "y", "z")),
+        scales=t(cols("scale_0", "scale_1", "scale_2")),
+        quats=t(cols("rot_0", "rot_1", "rot_2", "rot_3")),
+        opacities=t(data[:, col["opacity"]]),
+        sh0=t(cols("f_dc_0", "f_dc_1", "f_dc_2").reshape(n, 1, 3)),
+        shN=t(rest),
+    )

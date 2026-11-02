@@ -3,7 +3,7 @@ import pytest
 import torch
 
 
-from recon3d.recon.export_splat import export_ply, export_splat  # noqa: E402
+from recon3d.recon.export_splat import export_ply, export_splat, load_ply  # noqa: E402
 from recon3d.recon.trainer import Splats  # noqa: E402
 
 
@@ -87,3 +87,15 @@ def test_ply_header_and_size(tmp_path, k):
     assert np.allclose(body[:, o], s.opacities.numpy())
     assert np.allclose(body[:, o + 1:o + 4], s.scales.numpy())
     assert np.allclose(body[:, o + 4:o + 8], s.quats.numpy())
+
+
+@pytest.mark.parametrize("k", [0, 3])
+def test_ply_roundtrip(tmp_path, k):
+    s = make_splats(n=7, opacity_logit=list(np.linspace(-4, 4, 7)), k=k)
+    export_ply(s, tmp_path / "r.ply")
+    t = load_ply(tmp_path / "r.ply")
+    for name in ("means", "scales", "quats", "opacities", "sh0", "shN"):
+        a, b = getattr(s, name), getattr(t, name)
+        assert b.shape == a.shape and b.dtype == torch.float32, name
+        assert torch.allclose(a, b), name
+    assert t.sh_degree == s.sh_degree
