@@ -1,3 +1,4 @@
+import numpy as np
 import pytest
 
 from recon3d.capture.format import CaptureFormatError, load_capture
@@ -13,7 +14,7 @@ def test_load_valid_capture(tmp_path):
 
 def test_rejects_unknown_version(tmp_path):
     with pytest.raises(CaptureFormatError, match="不支持的拍摄包版本"):
-        load_capture(make_capture(tmp_path, format_version=2), tmp_path / "w")
+        load_capture(make_capture(tmp_path, format_version=3), tmp_path / "w")
 
 
 def test_rejects_missing_image(tmp_path):
@@ -82,3 +83,38 @@ def test_loads_android_package(tmp_path):
     # optional depth intrinsics (depth-image pixels) written by the Android writer
     assert all(f.depth_fx == 6.5 and f.depth_fy == 6.5 for f in cap.frames)
     assert all(f.depth_cx == 4.0 and f.depth_cy == 3.0 for f in cap.frames)
+
+
+def test_v2_with_confidence_loads(tmp_path):
+    conf = [np.full((6, 8), 200, np.uint8)] * 2
+    z = make_capture(tmp_path, n_frames=2, format_version=2, confidences=conf, depth_kind="raw",
+                     depths=[np.full((6, 8), 1500, np.uint16)] * 2)
+    cap = load_capture(z, tmp_path / "w")
+    assert cap.manifest.format_version == 2
+    assert cap.frames[0].confidence == "conf/000001.png"
+    assert cap.frames[0].depth_kind == "raw"
+    assert (cap.root / "conf/000001.png").is_file()
+
+
+def test_v2_without_confidence_defaults_smooth(tmp_path):
+    z = make_capture(tmp_path, n_frames=1, format_version=2)
+    fr = load_capture(z, tmp_path / "w").frames[0]
+    assert fr.confidence is None and fr.depth_kind == "smooth"
+
+
+def test_v2_missing_confidence_file_is_error(tmp_path):
+    z = make_capture(tmp_path, n_frames=1, format_version=2, confidences=[np.zeros((6, 8), np.uint8)],
+                     depths=[np.zeros((6, 8), np.uint16)], drop_confidence=1)
+    with pytest.raises(CaptureFormatError, match="缺少置信度图"):
+        load_capture(z, tmp_path / "w")
+
+
+def test_bad_depth_kind_is_error(tmp_path):
+    z = make_capture(tmp_path, n_frames=1, format_version=2, depth_kind="fuzzy")
+    with pytest.raises(CaptureFormatError, match="frames.jsonl 格式错误"):
+        load_capture(z, tmp_path / "w")
+
+
+def test_v3_rejected(tmp_path):
+    with pytest.raises(CaptureFormatError, match="不支持的拍摄包版本: 3"):
+        load_capture(make_capture(tmp_path, format_version=3), tmp_path / "w")

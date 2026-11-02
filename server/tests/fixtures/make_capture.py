@@ -1,4 +1,4 @@
-"""Build synthetic capture-format-v1 zips for tests."""
+"""Build synthetic capture-format v1/v2 zips for tests."""
 from __future__ import annotations
 
 import io
@@ -35,6 +35,9 @@ def make_capture(
     images: list[np.ndarray] | None = None,
     depths: list[np.ndarray] | None = None,
     depth_intrinsics: tuple[float, float, float, float] | None = None,
+    confidences: list[np.ndarray] | None = None,
+    depth_kind: str | None = None,
+    drop_confidence: int | None = None,
     name: str = "capture.zip",
 ) -> Path:
     """Write a capture zip into tmp_path and return its path.
@@ -48,6 +51,9 @@ def make_capture(
         width/height are taken from the first one and with_depth is implied.
     depth_intrinsics: optional (depth_fx, depth_fy, depth_cx, depth_cy) written on every
         frame that has depth (in depth-image pixels).
+    confidences: v2 only; optional list of uint8 HxW arrays written as conf/%06d.png.
+    depth_kind: v2 only; written per frame, defaults to "raw" with confidences else "smooth".
+    drop_confidence: 1-based frame index whose confidence file is omitted (field still written).
     """
     if images is not None:
         image_height, image_width = images[0].shape[:2]
@@ -84,6 +90,9 @@ def make_capture(
                 "depth": depth_name, "pose": pose,
                 "fx": fx, "fy": fy, "cx": cx, "cy": cy,
             }
+            if format_version == 2:
+                rec["depth_kind"] = depth_kind or ("raw" if confidences is not None else "smooth")
+                rec["confidence"] = f"conf/{i:06d}.png" if confidences is not None else None
             if with_depth and depth_intrinsics is not None:
                 rec.update(zip(("depth_fx", "depth_fy", "depth_cx", "depth_cy"), depth_intrinsics))
             lines.append(json.dumps(rec))
@@ -101,5 +110,9 @@ def make_capture(
                 buf = io.BytesIO()
                 Image.fromarray(arr).save(buf, "PNG")
                 zf.writestr(depth_name, buf.getvalue())
+            if confidences is not None and drop_confidence != i:
+                buf = io.BytesIO()
+                Image.fromarray(confidences[i - 1], "L").save(buf, "PNG")
+                zf.writestr(f"conf/{i:06d}.png", buf.getvalue())
         zf.writestr("frames.jsonl", "\n".join(lines) + "\n")
     return out

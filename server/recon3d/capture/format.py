@@ -1,14 +1,15 @@
-"""Capture format v1 loader. See docs/capture-format.md."""
+"""Capture format v1/v2 loader. See docs/capture-format.md."""
 from __future__ import annotations
 
 import json
 import zipfile
 from pathlib import Path
+from typing import Literal
 
 import numpy as np
 from pydantic import BaseModel, ConfigDict, ValidationError
 
-SUPPORTED_VERSION = 1
+SUPPORTED_VERSIONS = (1, 2)
 
 
 class CaptureFormatError(Exception):
@@ -49,6 +50,10 @@ class Frame(BaseModel):
     depth_fy: float | None = None
     depth_cx: float | None = None
     depth_cy: float | None = None
+    # v2: optional 8-bit confidence PNG (same size as depth, 255 = most reliable) and the
+    # kind of depth it describes; v1 packages get the defaults.
+    confidence: str | None = None
+    depth_kind: Literal["raw", "smooth"] = "smooth"
 
 
 class Capture(BaseModel):
@@ -94,7 +99,7 @@ def load_capture(zip_path: Path, workdir: Path) -> Capture:
     except json.JSONDecodeError as e:
         raise CaptureFormatError("manifest.json 格式错误") from e
     version = raw.get("format_version") if isinstance(raw, dict) else None
-    if version != SUPPORTED_VERSION:
+    if version not in SUPPORTED_VERSIONS:
         raise CaptureFormatError(f"不支持的拍摄包版本: {version}")
     try:
         manifest = Manifest(**raw)
@@ -123,12 +128,14 @@ def load_capture(zip_path: Path, workdir: Path) -> Capture:
         )
 
     for fr in frames:
-        for rel in (fr.image, fr.depth):
+        for rel in (fr.image, fr.depth, fr.confidence):
             if rel is not None and not _inside(workdir, rel):
                 raise CaptureFormatError(f"帧文件路径非法: {rel}")
         if not (workdir / fr.image).is_file():
             raise CaptureFormatError(f"缺少图片: {fr.image}")
         if fr.depth is not None and not (workdir / fr.depth).is_file():
             raise CaptureFormatError(f"缺少深度图: {fr.depth}")
+        if fr.confidence is not None and not (workdir / fr.confidence).is_file():
+            raise CaptureFormatError(f"缺少置信度图: {fr.confidence}")
 
     return Capture(manifest=manifest, frames=frames, root=workdir)

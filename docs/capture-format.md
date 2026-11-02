@@ -1,4 +1,4 @@
-# 拍摄包格式 v1
+# 拍摄包格式 v1 / v2
 
 拍摄包是一个 zip 文件，下列文件位于 zip 根目录。
 
@@ -11,7 +11,7 @@
  "frame_count":120}
 ```
 
-- `format_version`: int，当前必须为 1，否则报“不支持的拍摄包版本”。
+- `format_version`: int，必须为 1 或 2（v2 见文末），否则报“不支持的拍摄包版本”。
 - `capture_id`, `room_id`, `device`: str；`kind` 固定为 `"model"`。
 - `created_at`: ISO8601。
 - `image_width/height`: JPEG 分辨率。
@@ -49,6 +49,23 @@ ARCore CPU 图像，传感器原始方向（横屏），不旋转。文件缺失
 深度内参：帧里有 `depth_fx/fy/cx/cy` 时直接使用；没有时，假定与图像同视场，按比例缩放（fx * depth_width / image_width 等）。
 如果没有深度内参，且深度图宽高比与图像宽高比相差超过 1%（|(dw/dh)/(W/H) − 1| > 0.01），服务端认为无法对齐，
 跳过该帧的深度（记一行日志，不报错），该帧只用于颜色训练。
+
+## v2 扩展
+
+`format_version: 2` 在 v1 基础上为每帧增加两个字段和一类文件，其余完全不变；服务端同时支持 v1 和 v2。
+
+- `depth_kind`: `"raw"` 或 `"smooth"`，缺省为 `"smooth"`，其他值报“frames.jsonl 格式错误”。
+  `"raw"` 为 ARCore Raw Depth（未平滑、未填洞）；`"smooth"` 为 `acquireDepthImage16Bits` 的平滑深度。
+- `confidence`: 路径（如 `"conf/000001.png"`）或 null。8 位灰度 PNG，与深度图同尺寸，0..255，255 最可信；
+  没有 raw depth 的帧为 null。有 `confidence` 时文件必须存在，缺失报“缺少置信度图”。
+- 对 v1 包和 `confidence` 为 null 的帧，服务端使用启发式置信度（见后续置信度处理）。
+
+```json
+{"index":1,"t_ns":33000000,"image":"images/000001.jpg","depth":"depth/000001.png",
+ "depth_kind":"raw","confidence":"conf/000001.png",
+ "pose":[1,0,0,0, 0,1,0,0, 0,0,1,0, 0.1,0,0,1],
+ "fx":500.0,"fy":500.0,"cx":320.0,"cy":240.0}
+```
 
 ## 参考实现
 
