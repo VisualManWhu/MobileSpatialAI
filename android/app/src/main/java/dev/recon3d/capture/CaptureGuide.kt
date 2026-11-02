@@ -28,7 +28,7 @@ class CaptureGuide {
         const val ROAM_NEED = 24
         const val ROAM_PATH_M = 1.5f
         const val CELL_M = 0.5f
-        const val MAX_DEG_PER_S = 60.0
+        const val MAX_DEG_PER_S = 30.0
     }
 
     var stage: Stage = Stage.SPIN

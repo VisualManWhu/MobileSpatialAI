@@ -8,6 +8,8 @@ class CaptureGuideTest {
     @Test fun cannotFinishBeforeSpin() { val g = CaptureGuide(); spin(g, 0..90 step 5); assertFalse(g.last.canFinish); assertTrue(g.last.hint.contains("先完成原地转圈")) }
     @Test fun trackingLostDoesNotAddCoverage() { val g = CaptureGuide(); spin(g, 0..355 step 5, tracking = false); assertEquals(0f, g.last.stageProgress); assertEquals(Stage.SPIN, g.last.stage); assertEquals("跟丢了，请回到刚才的位置", g.last.warning); assertEquals(Arrow.NONE, g.last.arrow) }
     @Test fun fastRotationWarns() { val g = CaptureGuide(); g.onFrame(0, yaw(0f), true); val ui = g.onFrame(100_000_000, yaw(20f), true); assertEquals("太快了，慢一点", ui.warning) }
+    @Test fun above30DegPerSecWarns() { val g = CaptureGuide(); g.onFrame(0, yaw(0f), true); assertEquals("太快了，慢一点", g.onFrame(100_000_000, yaw(4f), true).warning) }
+    @Test fun below30DegPerSecNoWarning() { val g = CaptureGuide(); g.onFrame(0, yaw(0f), true); assertNull(g.onFrame(100_000_000, yaw(2f), true).warning) }
     @Test fun firstFrameNeverWarns() { val g = CaptureGuide(); assertNull(g.onFrame(0, yaw(100f), true).warning) }
     @Test fun slowRotationNoWarning() { val g = CaptureGuide(); g.onFrame(0, yaw(0f), true); assertNull(g.onFrame(1_000_000_000, yaw(20f), true).warning) }
     @Test fun sweepNeedsUpAndDown() { val g = afterSpin(); pitchTo(g, 50f); assertEquals(0.5f, g.last.stageProgress); assertEquals(Arrow.DOWN, g.last.arrow) }
