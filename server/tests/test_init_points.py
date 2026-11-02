@@ -2,8 +2,12 @@ import numpy as np
 import pytest
 import torch
 
-from recon3d.recon.dataset import TrainingSet
+from recon3d.capture.format import load_capture
+from recon3d.config import PROFILES
+from recon3d.recon.confidence import depth_confidence
+from recon3d.recon.dataset import TrainingSet, build_training_set
 from recon3d.recon.init_points import init_points
+from tests.fixtures.make_capture import make_capture
 
 
 def _ts(depths, n=2, H=40, W=60):
@@ -12,7 +16,7 @@ def _ts(depths, n=2, H=40, W=60):
     c2w[1, 0, 3] = 0.5
     return TrainingSet(
         images=torch.rand(n, H, W, 3), K=K, c2w=c2w, depths=depths,
-        confs=[None if d is None else torch.ones_like(d) for d in depths],
+        confs=[None if d is None else torch.from_numpy(depth_confidence(d.numpy(), None)) for d in depths],
     )
 
 
@@ -50,14 +54,13 @@ def test_invalid_and_far_dropped_and_padded():
     xyz, rgb = init_points(_ts([d, None]), voxel_size=0.05, min_points=500)
     assert xyz.shape == (500, 3)
     assert np.sum(np.isclose(rgb, 0.5).all(axis=1)) >= 1
+    # without padding only the 2 m region survives: the 9 m columns are dropped
+    real, _ = init_points(_ts([d, None]), voxel_size=0.05, min_points=0)
+    assert len(real) > 0
+    assert np.abs(real[:, 2]).max() < 5.0
 
 
 def test_depth_intrinsics_used_when_present(tmp_path):
-    from recon3d.capture.format import load_capture
-    from recon3d.config import PROFILES
-    from recon3d.recon.dataset import build_training_set
-    from tests.fixtures.make_capture import make_capture
-
     # image 64x48 fx=50 -> scaled depth fx would be 6.25; depth intrinsics say 3.125
     z = make_capture(tmp_path, n_frames=1, poses=[[1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1]],
                      depth_intrinsics=(3.125, 3.125, 4.0, 3.0))
@@ -71,11 +74,6 @@ def test_depth_intrinsics_used_when_present(tmp_path):
 
 
 def test_init_points_drops_low_confidence(tmp_path):
-    from recon3d.capture.format import load_capture
-    from recon3d.config import PROFILES
-    from recon3d.recon.dataset import build_training_set
-    from tests.fixtures.make_capture import make_capture
-
     depth = np.full((6, 8), 1500, np.uint16)
     conf = np.full((6, 8), 255, np.uint8); conf[:, :4] = 0
     z = make_capture(tmp_path, n_frames=1, format_version=2, depths=[depth], confidences=[conf])
@@ -87,11 +85,6 @@ def test_init_points_drops_low_confidence(tmp_path):
 
 
 def test_init_points_v1_drops_far_and_edges(tmp_path):
-    from recon3d.capture.format import load_capture
-    from recon3d.config import PROFILES
-    from recon3d.recon.dataset import build_training_set
-    from tests.fixtures.make_capture import make_capture
-
     depth = np.full((6, 8), 1500, np.uint16); depth[:, 6:] = 5000  # 5 m: beyond 4 m, plus an edge at col 5|6
     z = make_capture(tmp_path, n_frames=1, depths=[depth])
     ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
