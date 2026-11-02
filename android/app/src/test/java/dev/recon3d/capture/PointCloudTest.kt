@@ -23,7 +23,7 @@ class PointCloudTest {
     private fun depth(mm: Int) = ShortArray(dw * dh) { mm.toShort() }
 
     @Test fun backProjectsWithPoseAndColoursFromImage() {
-        val c = DepthCloud(step = 1)
+        val c = DepthCloud(step = 1, minViews = 1)
         // all pixels 2 m away; camera at x = 1 looking down -Z; grey-ish red image (Y=100, V=+40)
         val added = c.addKeyframe(depth(2000), null, dw, dh, k, translate(1f), nv21(100, 128, 168), w, h)
         assertEquals(dw * dh, added)
@@ -40,7 +40,7 @@ class PointCloudTest {
     }
 
     @Test fun rotationOfPoseIsApplied() {
-        val c = DepthCloud(step = 1)
+        val c = DepthCloud(step = 1, minViews = 1)
         // camera turned 90 deg to the right: its -Z now points along world +X, so a point 2 m ahead is at world x = +2
         c.addKeyframe(depth(2000), null, dw, dh, k, yaw(90f), nv21(0, 128, 128), w, h)
         val s = c.snapshot()
@@ -49,25 +49,34 @@ class PointCloudTest {
     }
 
     @Test fun filtersRangeConfidenceAndInvalidAndDedupesVoxels() {
-        val c = DepthCloud(step = 1)
+        val c = DepthCloud(step = 1, minViews = 1)
         val d = depth(2000)
         d[0] = 0            // invalid
         d[1] = 100          // 10 cm: too close
-        d[2] = 6000         // 6 m: too far
+        d[2] = 4000         // 4 m: beyond 3.5 m
         val conf = ByteArray(dw * dh) { 255.toByte() }
-        conf[3] = 10        // low confidence
+        conf[3] = 100       // below 160
         assertEquals(dw * dh - 4, c.addKeyframe(d, conf, dw, dh, k, identity(), nv21(0, 128, 128), w, h))
         // the same keyframe again lands in the same voxels: nothing new
         assertEquals(0, c.addKeyframe(d, conf, dw, dh, k, identity(), nv21(0, 128, 128), w, h))
         assertEquals(dw * dh - 4, c.size)
     }
 
+    @Test fun voxelNeedsTwoKeyframesBeforeItBecomesAPoint() {
+        val c = DepthCloud(step = 1) // default minViews = 2
+        val img = nv21(0, 128, 128)
+        assertEquals(0, c.addKeyframe(depth(2000), null, dw, dh, k, identity(), img, w, h)) // first sighting only counts
+        assertEquals(dw * dh, c.addKeyframe(depth(2000), null, dw, dh, k, identity(), img, w, h)) // second keyframe agrees
+        assertEquals(0, c.addKeyframe(depth(2000), null, dw, dh, k, identity(), img, w, h)) // already points
+        assertEquals(dw * dh, c.size)
+    }
+
     @Test fun stepSubsamplesAndCapApplies() {
-        val c = DepthCloud(maxPoints = 3, step = 1)
+        val c = DepthCloud(maxPoints = 3, step = 1, minViews = 1)
         assertEquals(3, c.addKeyframe(depth(1500), null, dw, dh, k, identity(), nv21(0, 128, 128), w, h))
         c.clear()
         assertEquals(0, c.size)
-        val c2 = DepthCloud(step = 2)
+        val c2 = DepthCloud(step = 2, minViews = 1)
         assertEquals(2, c2.addKeyframe(depth(1500), null, dw, dh, k, identity(), nv21(0, 128, 128), w, h)) // (0,0),(2,0)
     }
 
