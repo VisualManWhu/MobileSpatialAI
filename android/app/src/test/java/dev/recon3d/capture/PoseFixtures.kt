@@ -1,6 +1,5 @@
 package dev.recon3d.capture
 
-import kotlin.math.abs
 import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
@@ -32,26 +31,3 @@ fun pose(yawDeg: Float, pitchDeg: Float = 0f, x: Float = 0f, y: Float = 0f, z: F
 fun identity(): FloatArray = pose(0f)
 fun yaw(deg: Float): FloatArray = pose(deg)
 fun translate(x: Float, y: Float = 0f, z: Float = 0f): FloatArray = pose(0f, 0f, x, y, z)
-
-fun feed(g: CaptureGuide, p: FloatArray, tracking: Boolean = true, dtMs: Long = 200) =
-    g.onFrame(nextTns(dtMs), p, tracking)
-
-fun spin(g: CaptureGuide, range: IntProgression, tracking: Boolean = true) {
-    for (d in range) feed(g, yaw(d.toFloat()), tracking)
-}
-
-fun afterSpin(): CaptureGuide {
-    val g = CaptureGuide()
-    spin(g, 0..355 step 5)
-    check(g.last.stage == Stage.SWEEP)
-    return g
-}
-
-fun pitchTo(g: CaptureGuide, deg: Float) {
-    val step = if (deg >= 0) 5f else -5f
-    var p = 0f
-    while (abs(p - deg) > 1e-3f) {
-        p = if (abs(deg - p) < 5f) deg else p + step
-        feed(g, pose(0f, p))
-    }
-}

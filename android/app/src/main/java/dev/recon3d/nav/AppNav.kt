@@ -11,6 +11,7 @@ import androidx.navigation.compose.rememberNavController
 import dev.recon3d.AppGraph
 import dev.recon3d.MSG_NO_SERVER
 import dev.recon3d.capture.CaptureScreen
+import dev.recon3d.capture.PreviewScreen
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.RoomListScreen
 import dev.recon3d.rooms.RoomScreen
@@ -18,6 +19,7 @@ import dev.recon3d.settings.SettingsScreen
 import dev.recon3d.viewer.ViewerScreen
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import java.io.File
 
 object Routes {
     const val ROOMS = "rooms"
@@ -25,9 +27,11 @@ object Routes {
     const val SETTINGS = "settings"
     const val CAPTURE = "capture/{roomId}"
     const val VIEWER = "viewer/{roomId}/{captureId}"
+    const val PREVIEW = "preview/{roomId}/{captureId}"
     fun room(roomId: String) = "room/$roomId"
     fun capture(roomId: String) = "capture/$roomId"
     fun viewer(roomId: String, captureId: String) = "viewer/$roomId/$captureId"
+    fun preview(roomId: String, captureId: String) = "preview/$roomId/$captureId"
 }
 
 /** App navigation graph: rooms (start) → room → capture / viewer; gear → settings. */
@@ -74,11 +78,36 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
         }
         composable(Routes.CAPTURE) { entry ->
             val roomId = entry.arguments?.getString("roomId") ?: return@composable
-            CaptureScreen(roomId = roomId, onFinished = { zip ->
-                graph.rooms.addCapture(roomId, CaptureRecord(id = zip.nameWithoutExtension, zipPath = zip.path))
-                Toast.makeText(context, "已保存拍摄，可以上传了", Toast.LENGTH_LONG).show()
-                nav.popBackStack() // back to the room
+            CaptureScreen(roomId = roomId, onFinished = { out ->
+                val id = out.zip.nameWithoutExtension
+                graph.rooms.addCapture(
+                    roomId,
+                    CaptureRecord(
+                        id = id, zipPath = out.zip.path, pointsPath = out.points?.path,
+                        frameCount = out.frames, pointCount = out.pointCount,
+                    ),
+                )
+                // Capture screen leaves the back stack: back from the preview returns to the room.
+                nav.navigate(Routes.preview(roomId, id)) { popUpTo(Routes.ROOM) }
             })
+        }
+        composable(Routes.PREVIEW) { entry ->
+            val roomId = entry.arguments?.getString("roomId") ?: return@composable
+            val captureId = entry.arguments?.getString("captureId") ?: return@composable
+            val record = runCatching { graph.rooms.capture(roomId, captureId) }.getOrNull() ?: return@composable
+            PreviewScreen(
+                record = record,
+                onUpload = {
+                    withServer { graph.uploader.start(roomId, captureId) }
+                    nav.popBackStack() // room shows the upload progress
+                },
+                onRetake = {
+                    graph.rooms.removeCapture(roomId, captureId)
+                    File(record.zipPath).delete()
+                    record.pointsPath?.let { File(it).delete() }
+                    nav.navigate(Routes.capture(roomId)) { popUpTo(Routes.ROOM) }
+                },
+            )
         }
         composable(Routes.VIEWER) { entry ->
             val roomId = entry.arguments?.getString("roomId") ?: return@composable

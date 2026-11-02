@@ -11,18 +11,19 @@ import com.google.ar.core.Session
 import com.google.ar.core.TrackingState
 import com.google.ar.core.exceptions.NotYetAvailableException
 import com.google.ar.core.exceptions.SessionPausedException
-import dev.recon3d.capture.CaptureGuide
-import dev.recon3d.capture.GuideUi
+import dev.recon3d.capture.CaptureStatus
 import dev.recon3d.capture.KeyframeSelector
+import dev.recon3d.capture.MotionMonitor
+import dev.recon3d.capture.PointCloudAccumulator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
- * GL-thread frame loop: session.update → camera feed → [CaptureGuide] → (when recording) [KeyframeSelector]
- * → copy image bytes into a [FrameJob] for [CapturePipeline]. [guide] and [selector] are only touched on
- * the GL thread (UI actions go through `GLSurfaceView.queueEvent`).
+ * GL-thread frame loop: session.update → camera feed → [MotionMonitor] → (when recording) accumulate the
+ * ARCore point cloud and, for [KeyframeSelector] keyframes, copy image bytes into a [FrameJob] for
+ * [CapturePipeline]. [monitor] and [selector] are only touched on the GL thread.
  */
 class CaptureRenderer(
     private val assets: AssetManager,
@@ -30,8 +31,10 @@ class CaptureRenderer(
     private val depthEnabled: Boolean,
     private val displayRotation: () -> Int,
 ) : GLSurfaceView.Renderer {
-    val guide = CaptureGuide()
+    private val monitor = MotionMonitor()
     private val selector = KeyframeSelector()
+    /** ARCore feature points seen while recording (for the post-capture preview); cleared with the pipeline. */
+    val cloud = PointCloudAccumulator()
     private val background = BackgroundRenderer()
     private val pose = FloatArray(16)
     private var lastTimestamp = 0L
@@ -40,8 +43,8 @@ class CaptureRenderer(
     private var geometryDirty = false
     private var depthProbeStartNs = 0L
 
-    private val _ui = MutableStateFlow(guide.last)
-    val ui: StateFlow<GuideUi> = _ui
+    private val _status = MutableStateFlow(monitor.last)
+    val status: StateFlow<CaptureStatus> = _status
 
     /** Where keyframes go; swapped by the host when a capture is reset. */
     @Volatile var pipeline: CapturePipeline? = null
@@ -82,12 +85,6 @@ class CaptureRenderer(
     private var rawStatsFor: CapturePipeline? = null
     private var wasRecording = false
 
-    /** GL thread only (use `queueEvent`). */
-    fun skipStage() {
-        guide.skipStage()
-        _ui.value = guide.last
-    }
-
     override fun onSurfaceCreated(gl: GL10?, config: EGLConfig?) {
         GLES30.glClearColor(0f, 0f, 0f, 1f)
         background.createOnGlThread(assets)
@@ -123,7 +120,7 @@ class CaptureRenderer(
         val tracking = camera.trackingState == TrackingState.TRACKING
         camera.pose.toMatrix(pose, 0) // world_from_camera, column-major, OpenGL convention
         if (tracking) poseHistory.record(t, pose)
-        _ui.value = guide.onFrame(t, pose, tracking)
+        _status.value = monitor.onFrame(t, pose, tracking)
 
         try {
             if (!_depthReady.value && tracking) probeDepthSize(frame, t)
@@ -133,6 +130,7 @@ class CaptureRenderer(
             wasRecording = rec
             if (p !== rawStatsFor) { logRawDepthStats(); rawStatsFor = p }
             if (!rec || !_depthReady.value || p == null) return
+            if (tracking) frame.acquirePointCloud().use { pc -> cloud.add(pc.points, pc.ids, pc.timestamp) }
             if (selector.shouldKeep(t, pose, tracking) && p.hasRoom()) {
                 buildJob(frame, camera, t, logIntrinsics = intrinsicsLoggedFor !== p)?.let {
                     intrinsicsLoggedFor = p
@@ -178,6 +176,11 @@ class CaptureRenderer(
             val f = intr.focalLength
             val c = intr.principalPoint
             if (logIntrinsics) logIntrinsicsOnce(img, intr.imageDimensions, f, c, camera, depth)
+            // Give the preview cloud's new points the luma of this keyframe's pixel they land on.
+            cloud.colorize(
+                pose, f[0] * sx, f[1] * sy, c[0] * sx, c[1] * sy,
+                img.width, img.height, yP.buffer, yP.rowStride, yP.pixelStride,
+            )
             FrameJob(
                 tNs = t, width = img.width, height = img.height,
                 y = yP.copyBytes(), yRowStride = yP.rowStride, yPixelStride = yP.pixelStride,

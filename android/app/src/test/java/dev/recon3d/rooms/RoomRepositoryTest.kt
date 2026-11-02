@@ -32,6 +32,16 @@ class RoomRepositoryTest {
         assertEquals("model", reloaded.kind)
     }
 
+    @Test fun removeCaptureDropsRecordAndPersists() {
+        val room = repo.createRoom("客厅")
+        repo.addCapture(room.id, CaptureRecord(id = "cap-1", zipPath = "/x/cap-1.zip", pointsPath = "/x/cap-1.points.splat", frameCount = 12, pointCount = 345))
+        repo.addCapture(room.id, CaptureRecord(id = "cap-2", zipPath = "/x/cap-2.zip"))
+        assertEquals(345, repo.capture(room.id, "cap-1").pointCount)
+        repo.removeCapture(room.id, "cap-1")
+        repo.removeCapture(room.id, "nope") // absent: no-op
+        assertEquals(listOf("cap-2"), RoomRepository(dir).room(room.id).captures.map { it.id })
+    }
+
     @Test fun writesAtomicallyWithoutLeftoverTempFile() {
         repo.createRoom("书房")
         assertTrue(File(dir, "rooms.json").isFile)

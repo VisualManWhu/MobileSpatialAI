@@ -13,7 +13,6 @@ import android.util.Log
 import androidx.activity.compose.LocalActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -21,10 +20,8 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -33,7 +30,6 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
@@ -46,10 +42,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.Path
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -72,24 +65,28 @@ import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationExceptio
 import dev.recon3d.capture.ar.ArSessionHelper
 import dev.recon3d.capture.ar.CapturePipeline
 import dev.recon3d.capture.ar.CaptureRenderer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-import kotlin.math.roundToInt
 
 private val Blue = Color(0xFF2F80ED)
 private val Yellow = Color(0xFFFFD600)
 private val RecordRed = Color(0xFFE53935)
 private val Scrim = Color.Black.copy(alpha = 0.45f)
 
+/** What a finished capture produced: the package zip, the preview point cloud (null if empty) and the keyframe count. */
+class CaptureOutput(val zip: File, val points: File?, val frames: Int, val pointCount: Int)
+
 /**
- * AR capture screen (style A): live camera feed with the three-stage guide overlay. Tapping the red button
- * starts keeping keyframes; "完成拍摄" drains the queue and writes
- * `filesDir/captures/<roomId>/<captureId>.zip`, then calls [onFinished].
+ * AR capture screen: live camera feed, a red record button and the keyframe count; warnings when ARCore
+ * loses tracking or the phone turns too fast. "完成拍摄" drains the queue, writes
+ * `filesDir/captures/<roomId>/<captureId>.zip` plus `<captureId>.points.splat`, then calls [onFinished].
  */
 @Composable
-fun CaptureScreen(roomId: String, onFinished: (zip: File) -> Unit, modifier: Modifier = Modifier) {
+fun CaptureScreen(roomId: String, onFinished: (CaptureOutput) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val activity = LocalActivity.current ?: return
     var granted by remember {
@@ -114,7 +111,7 @@ fun CaptureScreen(roomId: String, onFinished: (zip: File) -> Unit, modifier: Mod
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
     }
 
-    // The guide's arrows assume portrait; also keep the screen awake while capturing.
+    // Portrait only: a rotation would recreate the GL surface mid-capture.
     DisposableEffect(activity) {
         val old = activity.requestedOrientation
         activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
@@ -207,7 +204,14 @@ private class ArHost(private val activity: Activity, private val roomId: String)
         }
         if (zip != null) {
             finished = true
-            return FinishResult.Saved(zip)
+            val snap = r.cloud.snapshot()
+            val points = if (snap.size == 0) null else withContext(Dispatchers.IO) {
+                File(zip.parentFile, zip.nameWithoutExtension + POINTS_SUFFIX).also { f ->
+                    runCatching { f.writeBytes(PointCloudSplat.encode(snap)) }
+                        .onFailure { Log.w(TAG, "point cloud not written", it) }
+                }.takeIf { it.isFile }
+            }
+            return FinishResult.Saved(CaptureOutput(zip, points, p.kept.value, snap.size))
         }
         p.abandon()
         val fresh = newPipeline(r)
@@ -219,6 +223,7 @@ private class ArHost(private val activity: Activity, private val roomId: String)
     private fun newPipeline(r: CaptureRenderer): CapturePipeline {
         val captureId = "cap-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS"))
         val staging = File(activity.filesDir, "captures/$roomId/$captureId")
+        r.cloud.clear()
         return CapturePipeline(staging, roomId, captureId, Build.MODEL, depthSize = { r.depthSize })
     }
 
@@ -253,8 +258,11 @@ private class ArHost(private val activity: Activity, private val roomId: String)
     }
 }
 
+/** Suffix of the preview point cloud written next to the capture zip. */
+const val POINTS_SUFFIX = ".points.splat"
+
 private sealed interface FinishResult {
-    data class Saved(val zip: File) : FinishResult
+    data class Saved(val output: CaptureOutput) : FinishResult
     data object NoFrames : FinishResult
     data object Failed : FinishResult
 }
@@ -271,7 +279,7 @@ private const val MSG_AR_START_FAILED = "AR 启动失败，请检查是否已安
 internal const val MSG_NO_DEPTH_FALLBACK = "未获取到深度，本次拍摄将不含深度（重建质量可能下降）"
 
 @Composable
-private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> Unit) {
+private fun ArCapture(activity: Activity, roomId: String, onFinished: (CaptureOutput) -> Unit) {
     val host = remember(roomId) { ArHost(activity, roomId) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(lifecycle, host) {
@@ -305,15 +313,15 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
     }
 
     val pipeline = host.pipeline ?: return
-    val guideUi by renderer.ui.collectAsState()
+    val status by renderer.status.collectAsState()
     val depthReady by renderer.depthReady.collectAsState()
     val depthFallback by renderer.depthFallback.collectAsState()
     var recording by remember { mutableStateOf(false) }
-    val ui = when {
-        !depthReady -> guideUi.copy(subHint = "正在等待深度传感器…")
-        // R27: tell the user the capture has no depth (the guide's own warning, if any, takes precedence).
-        depthFallback && recording -> guideUi.copy(warning = guideUi.warning ?: MSG_NO_DEPTH_FALLBACK)
-        else -> guideUi
+    val warning = when {
+        status.warning != null -> status.warning
+        // R27: tell the user the capture has no depth.
+        depthFallback && recording -> MSG_NO_DEPTH_FALLBACK
+        else -> null
     }
     val kept by pipeline.kept.collectAsState()
     val dropped by pipeline.dropped.collectAsState()
@@ -339,7 +347,8 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
             },
         )
         CaptureOverlay(
-            ui = ui,
+            warning = warning,
+            depthReady = depthReady,
             recording = recording,
             kept = kept,
             dropped = dropped,
@@ -354,14 +363,13 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
                 renderer.recording = recording
                 message = null
             },
-            onSkip = { host.glView?.queueEvent { renderer.skipStage() } },
             onFinish = {
                 if (finishing) return@CaptureOverlay
                 finishing = true
                 scope.launch {
                     try {
                         when (val r = host.finish()) {
-                            is FinishResult.Saved -> onFinished(r.zip)
+                            is FinishResult.Saved -> onFinished(r.output)
                             FinishResult.NoFrames -> message = "还没有拍到画面，请先点红色按钮开始拍摄"
                             FinishResult.Failed -> {
                                 recording = false
@@ -390,43 +398,23 @@ private fun ArCapture(activity: Activity, roomId: String, onFinished: (File) -> 
 
 @Composable
 private fun CaptureOverlay(
-    ui: GuideUi,
+    warning: String?,
+    depthReady: Boolean,
     recording: Boolean,
     kept: Int,
     dropped: Int,
     failed: Int,
     message: String?,
     onRecord: () -> Unit,
-    onSkip: () -> Unit,
     onFinish: () -> Unit,
 ) {
     Box(Modifier.fillMaxSize()) {
-        // Top: stage pills + progress ring
-        Column(
-            Modifier.align(Alignment.TopCenter).fillMaxWidth().padding(top = 12.dp),
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-        ) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                StagePill("①", "转圈", Stage.SPIN, ui.stage)
-                StagePill("②", "上下", Stage.SWEEP, ui.stage)
-                StagePill("③", "走动", Stage.ROAM, ui.stage)
-            }
-            ProgressRing(ui.stageProgress)
-        }
-
-        // Center: big arrow
-        if (ui.arrow != Arrow.NONE) {
-            BigArrow(arrowDegrees(ui.arrow), Modifier.align(Alignment.Center).size(160.dp))
-        }
-
-        // Bottom: warning, hints, buttons
         Column(
             Modifier.align(Alignment.BottomCenter).fillMaxWidth().background(Scrim).padding(16.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            ui.warning?.let { w ->
+            warning?.let { w ->
                 Text(
                     "⚠ $w",
                     color = Color.Black,
@@ -435,66 +423,24 @@ private fun CaptureOverlay(
                     modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(Yellow).padding(10.dp),
                 )
             }
-            Text(ui.hint, color = Color.White, fontSize = 20.sp, fontWeight = FontWeight.Bold, textAlign = TextAlign.Center)
-            if (ui.subHint.isNotEmpty()) {
-                Text(ui.subHint, color = Color.White.copy(alpha = 0.85f), fontSize = 15.sp, textAlign = TextAlign.Center)
-            }
-            Spacer(Modifier.height(4.dp))
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    if (ui.stage == Stage.SWEEP || ui.stage == Stage.ROAM) {
-                        OutlinedButton(onClick = onSkip, colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) {
-                            Text("跳过")
-                        }
-                    }
-                }
+                Box(Modifier.weight(1f))
                 RecordButton(recording, onRecord)
                 Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
-                    if (ui.canFinish) {
+                    if (kept > 0) {
                         Button(onClick = onFinish, colors = ButtonDefaults.buttonColors(containerColor = Blue)) { Text("完成拍摄") }
                     }
                 }
             }
             val status = when {
                 message != null -> message
+                !depthReady -> "正在等待深度传感器…"
                 recording -> "录制中 · 已拍 $kept 张" + lossNote(dropped, failed)
                 kept > 0 -> "已暂停 · 已拍 $kept 张"
-                else -> "点红色按钮开始拍摄"
+                else -> "点红色按钮开始拍摄，慢慢绕房间走一圈"
             }
-            Text(status, color = if (message != null) Yellow else Color.White.copy(alpha = 0.85f), fontSize = 13.sp)
+            Text(status, color = if (message != null) Yellow else Color.White.copy(alpha = 0.85f), fontSize = 14.sp)
         }
-    }
-}
-
-@Composable
-private fun StagePill(num: String, label: String, stage: Stage, current: Stage) {
-    val done = current.ordinal > stage.ordinal
-    val active = current == stage
-    val bg = when {
-        active -> Blue
-        done -> Color.Black.copy(alpha = 0.55f)
-        else -> Color.Black.copy(alpha = 0.35f)
-    }
-    Text(
-        if (done) "✓ $label" else "$num $label",
-        color = if (active || done) Color.White else Color.White.copy(alpha = 0.7f),
-        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal,
-        fontSize = 14.sp,
-        modifier = Modifier.clip(RoundedCornerShape(50)).background(bg).padding(horizontal = 14.dp, vertical = 6.dp),
-    )
-}
-
-@Composable
-private fun ProgressRing(progress: Float) {
-    Box(Modifier.size(72.dp).clip(CircleShape).background(Scrim), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator(
-            progress = { progress.coerceIn(0f, 1f) },
-            modifier = Modifier.size(64.dp),
-            color = Blue,
-            trackColor = Color.White.copy(alpha = 0.3f),
-            strokeWidth = 6.dp,
-        )
-        Text("${(progress.coerceIn(0f, 1f) * 100).roundToInt()}%", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
     }
 }
 
@@ -512,41 +458,10 @@ private fun RecordButton(recording: Boolean, onClick: () -> Unit) {
     }
 }
 
-/** Arrow glyph pointing up, rotated clockwise by [degrees]. */
-@Composable
-private fun BigArrow(degrees: Float, modifier: Modifier) {
-    Canvas(modifier.rotate(degrees)) {
-        val w = size.width
-        val h = size.height
-        val path = Path().apply {
-            moveTo(w * 0.5f, h * 0.08f)
-            lineTo(w * 0.88f, h * 0.48f)
-            lineTo(w * 0.64f, h * 0.48f)
-            lineTo(w * 0.64f, h * 0.92f)
-            lineTo(w * 0.36f, h * 0.92f)
-            lineTo(w * 0.36f, h * 0.48f)
-            lineTo(w * 0.12f, h * 0.48f)
-            close()
-        }
-        drawPath(path, Color.White.copy(alpha = 0.9f))
-        drawPath(path, Blue, style = Stroke(width = 4.dp.toPx()))
-    }
-}
-
 private fun lossNote(dropped: Int, failed: Int): String {
     val parts = listOfNotNull(
         "丢弃 $dropped".takeIf { dropped > 0 },
         "失败 $failed".takeIf { failed > 0 },
     )
     return if (parts.isEmpty()) "" else parts.joinToString("，", "（", "）")
-}
-
-internal fun arrowDegrees(a: Arrow): Float = when (a) {
-    Arrow.UP -> 0f
-    Arrow.FORWARD_RIGHT -> 45f
-    Arrow.RIGHT -> 90f
-    Arrow.DOWN -> 180f
-    Arrow.LEFT -> 270f
-    Arrow.FORWARD_LEFT -> 315f
-    Arrow.NONE -> 0f
 }

@@ -38,6 +38,12 @@ data class CaptureRecord(
     val message: String? = null,
     /** Local `scene.splat` once downloaded. */
     val scenePath: String? = null,
+    /** Preview point cloud (`.points.splat`) written at capture time; null when none. */
+    val pointsPath: String? = null,
+    /** Keyframes in the package (0 when unknown, e.g. records from older versions). */
+    val frameCount: Int = 0,
+    /** Points in [pointsPath]. */
+    val pointCount: Int = 0,
 )
 
 /**
@@ -75,6 +81,11 @@ open class RoomRepository(
     open fun editCapture(roomId: String, captureId: String, edit: (CaptureRecord) -> CaptureRecord) = mutateRoom(roomId) { room ->
         require(room.captures.any { it.id == captureId }) { "no capture $captureId in $roomId" }
         room.copy(captures = room.captures.map { if (it.id == captureId) edit(it) else it })
+    }
+
+    /** Removes the record (the caller deletes its files). No-op if absent. */
+    fun removeCapture(roomId: String, captureId: String) = mutateRoom(roomId) { room ->
+        room.copy(captures = room.captures.filterNot { it.id == captureId })
     }
 
     fun capture(roomId: String, captureId: String): CaptureRecord =

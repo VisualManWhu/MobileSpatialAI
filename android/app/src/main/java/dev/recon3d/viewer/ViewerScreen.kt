@@ -71,8 +71,9 @@ fun ViewerScreen(repo: RoomRepository, roomId: String, captureId: String) {
     SceneViewer(scenePath!!)
 }
 
+/** WebView viewer for one `.splat` file at [scenePath] (also used by the capture preview). */
 @Composable
-private fun SceneViewer(scenePath: String) {
+internal fun SceneViewer(scenePath: String) {
     // Each retry bumps the attempt: a fresh WebView, a fresh watchdog, stale callbacks ignored.
     var attempt by remember(scenePath) { mutableIntStateOf(0) }
     var state by remember(scenePath) { mutableStateOf<ViewerState>(ViewerState.Loading) }
