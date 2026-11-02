@@ -37,73 +37,46 @@ nvidia-smi
 
 （截图位置：nvidia-smi 的正常输出表格。）
 
-## 第 2 步：设置 WSL 镜像网络，让手机能访问
+## 第 2 步：让手机能访问 WSL 里的服务（两条管理员命令，需要你本人操作）
 
-默认情况下 WSL 在一个虚拟网络里，手机连不上。"镜像网络模式"会让 WSL 和 Windows 共用同一个 IP。
+WSL 在一个虚拟网络里，手机直接连不到它。做法是：服务端在 WSL 里监听 **18765** 端口（启动脚本在 WSL 下会自动这样做），
+Windows 把自己的 **8765** 端口转发给它，手机只需要知道笔记本的 IP 和 8765。
 
-前提：需要 **Windows 11 22H2 或更新版本**，且 WSL 版本够新。检查方法：
+> 实测 2026-11-02：WSL 的"镜像网络模式"（`networkingMode=mirrored`）在这台笔记本上不稳定——配置全对的情况下手机时通时不通，
+> 还会把 8765 端口劫持走。**不要用镜像模式**。如果你的 `%UserProfile%\.wslconfig` 里有 `networkingMode=mirrored`，
+> 把它改成 `networkingMode=NAT`（或删掉这一行），然后 `wsl --shutdown`。
 
-- 按 `Win+R` 输入 `winver` 回车，看版本号是否为 22H2 及以上。
-- 在 PowerShell 运行 `wsl --version`，能显示版本号即可；若报错或版本很旧，先运行 `wsl --update` 升级。
+这两条是系统安全设置，**请你自己执行，不要让工具代劳**：开始菜单搜索 "PowerShell"，**右键 → 以管理员身份运行**，依次粘贴：
 
-1. 在 PowerShell 运行 `notepad $env:UserProfile\.wslconfig`（文件不存在时会提示新建，选"是"）。
-2. **检查**里面是否已有下面两行；没有就**补上**（已有则不用改）：
+1. 端口转发（Windows 原生功能，重启后仍有效）：
 
-```ini
-[wsl2]
-networkingMode=mirrored
+```powershell
+netsh interface portproxy add v4tov4 listenport=8765 listenaddress=0.0.0.0 connectport=18765 connectaddress=127.0.0.1
 ```
 
-3. 保存后，在 PowerShell 运行 `wsl --shutdown`，再重新打开 Ubuntu 使其生效。
-
-## 第 3 步：放行 Windows 防火墙的 8765 端口（需要你本人操作）
-
-服务端使用 TCP 8765 端口。Windows 防火墙默认会挡住手机的访问，需要放行一次。
-这是系统安全设置，**请你自己执行，不要让工具代劳**：
-
-1. 开始菜单搜索 "PowerShell"，**右键 → 以管理员身份运行**。
-2. 粘贴下面这一行并回车：
+2. 放行 Windows 防火墙的 8765 端口：
 
 ```powershell
 New-NetFirewallRule -DisplayName "Recon3D server 8765" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Private
 ```
 
-含义：新增一条"入站规则"，只允许 TCP 8765 端口、只在"专用网络"下生效（家里 / 实验室确认过的 Wi-Fi）。
-注意你的 Wi-Fi 必须被 Windows 标记为"专用网络"：设置 → 网络和 Internet → WLAN → 点你的 Wi-Fi → 网络配置文件类型选"专用网络"。
-想撤销时，管理员 PowerShell 运行：`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`。
+含义：只允许 TCP 8765 端口、只在"专用网络"下生效（家里 / 实验室确认过的 Wi-Fi）。
+你的 Wi-Fi 必须被 Windows 标记为"专用网络"：设置 → 网络和 Internet → WLAN → 点你的 Wi-Fi → 网络配置文件类型选"专用网络"；
+或在管理员 PowerShell 运行 `Set-NetConnectionProfile -InterfaceAlias "WLAN" -NetworkCategory Private`。
 
-## 第 3 步（续）：放行 WSL 的 Hyper-V 防火墙入站（同样由你本人执行）
+检查：`netsh interface portproxy show v4tov4` 能看到 `0.0.0.0 8765 → 127.0.0.1 18765` 一行；
+`Get-NetFirewallRule -DisplayName "Recon3D server 8765"` 显示 `Enabled : True`。
 
-镜像网络模式下，WSL 自己还有一层 "Hyper-V 防火墙"，默认会拦截手机发往 WSL 的入站连接，
-只放行上面的 Windows 规则还不够。仍在**管理员 PowerShell** 里运行（只放行 TCP 8765 这一个端口）：
+撤销：`netsh interface portproxy delete v4tov4 listenport=8765 listenaddress=0.0.0.0` 和
+`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`。
 
-```powershell
-New-NetFirewallHyperVRule -Name Recon3D8765 -DisplayName "Recon3D 8765" -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 8765 -Action Allow
-```
+> 旧版说明里的 `New-NetFirewallHyperVRule ... Recon3D8765` 规则不再需要；留着无害，想删：`Remove-NetFirewallHyperVRule -Name Recon3D8765`。
 
-说明：`{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}` 是 WSL 的固定标识；这条规则只允许外部访问 WSL 的 TCP 8765 端口，
-WSL 里的其他端口仍然被拦截（不要改成"整台 WSL 全部放行"，那样 WSL 里任何程序开的端口都会暴露给同一网络的所有设备）。
+## 第 3 步：给笔记本固定 IP（建议）
 
-检查是否已生效：
-
-```powershell
-Get-NetFirewallHyperVRule -Name Recon3D8765
-```
-
-能看到 `LocalPorts : 8765`、`Action : Allow`、`Enabled : True` 即可。
-
-**重要：规则加好后必须重启 WSL 才生效**（实测 2026-11-02：WSL 运行中新加的 Hyper-V 规则不会立即应用，手机仍然连不上）。
-在普通 PowerShell 运行 `wsl --shutdown`，然后重新打开 Ubuntu 终端、重新启动服务端（第 5 步）。
-另外，在笔记本自己的浏览器里用局域网 IP（如 `http://192.168.178.10:8765/...`）打不开是正常的，镜像模式不支持这种"自己绕回自己"的访问；用手机测，或者在笔记本上用 `http://127.0.0.1:8765/...`。
-
-想撤销，管理员 PowerShell 运行：
-
-```powershell
-Remove-NetFirewallHyperVRule -Name Recon3D8765
-```
-
-> 如果你以前按旧版说明执行过 `Set-NetFirewallHyperVVMSetting ... -DefaultInboundAction Allow`（整台 WSL 放行），
-> 建议恢复默认：`Set-NetFirewallHyperVVMSetting -Name '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -DefaultInboundAction NotConfigured`，然后改用上面这条按端口放行的规则。
+路由器可能给笔记本换 IP（实测重置 WSL 网络后从 `.10` 变成了 `.16`），换了之后手机 App 里填的地址就失效。
+在路由器管理页里给笔记本"始终分配同一个 IP"（Fritz!Box：Heimnetz → Netzwerk → 笔记本 → 勾选 "Diesem Netzwerkgerät immer die gleiche IPv4-Adresse zuweisen"）。
+不固定也能用，只是 IP 变了要在 App 设置里改一次。
 
 ## 第 4 步：安装服务端
 
@@ -123,8 +96,8 @@ bash server/scripts/install.sh
 bash server/scripts/run.sh
 ```
 
-启动后屏幕会列出几个形如 `http://192.168.x.x:8765/api/v1/health` 的地址，并出现
-`Uvicorn running on http://0.0.0.0:8765`。**保持这个窗口不要关**。
+在 WSL 下脚本自动使用 18765 端口（配合第 2 步的转发），屏幕会出现
+`Uvicorn running on http://0.0.0.0:18765`，并提示手机应访问的地址（笔记本 IP + 8765）。**保持这个窗口不要关**。
 
 - 停止服务：在这个窗口按 `Ctrl+C`。
 - 数据位置：上传的拍摄包和重建结果在 `D:\projects\Recon3D\server\data\jobs\` 下，每个任务一个文件夹。可以手动删除旧任务的文件夹来腾空间。
@@ -146,12 +119,12 @@ bash server/scripts/run.sh
 ### 打不开怎么办
 
 - 手机和笔记本是不是同一个 Wi-Fi？有些 Wi-Fi 开了"AP 隔离/客户端隔离"（学校、实验室常见），设备之间互相访问不了，可换用手机热点让笔记本连接。
-- 第 3 步的防火墙规则是否已创建？Wi-Fi 是否是"专用网络"？
-- 第 2 步 `.wslconfig` 是否生效？改完需 `wsl --shutdown` 后重开 Ubuntu。
-- 第 3 步（续）的 Hyper-V 入站规则是否已创建？这是手机连不上的常见原因：运行 `Get-NetFirewallHyperVRule -Name Recon3D8765`（Tailscale 方式为 `Recon3D8765TS`），报错"找不到"说明没建。
-- Windows 版本是否 22H2 及以上、`wsl --version` 是否正常（见第 2 步前提）？
+- 笔记本 IP 是不是变了？PowerShell 运行 `ipconfig` 重新看一眼（见第 3 步）。
+- 第 2 步的两条命令是否都执行了？Wi-Fi 是否是"专用网络"？
+- `.wslconfig` 里是否还有 `networkingMode=mirrored`？有则改成 NAT 并 `wsl --shutdown`。
 - 服务窗口是否还在运行？
-- 先在笔记本自己的浏览器打开 `http://localhost:8765/api/v1/health`，能打开说明服务本身正常，问题在网络。
+- 在笔记本自己的浏览器依次打开：`http://127.0.0.1:18765/api/v1/health`（服务本身）、`http://127.0.0.1:8765/api/v1/health`（端口转发）、
+  `http://<笔记本IP>:8765/api/v1/health`（防火墙）。哪一个打不开，问题就在对应那层。
 
 ## Tailscale 方式（推荐；不要求同一个 Wi-Fi）
 
@@ -160,8 +133,8 @@ Tailscale 会在手机和笔记本之间建一条加密的虚拟局域网，两�
 
 1. **笔记本（Windows）**：打开 https://tailscale.com/download 下载 Windows 版并安装，登录一个账号。
 2. **手机**：在 Google Play 安装 "Tailscale"，用**同一个账号**登录，按提示允许建立 VPN。
-3. **WSL 里不用装 Tailscale**：第 2 步的镜像网络模式下，WSL 直接共用 Windows 的 Tailscale 网卡。
-4. **防火墙规则：只放行 Tailscale 地址段**。Windows 通常把 Tailscale 网卡归为"公用网络"，第 3 步的 `-Profile Private` 规则对它不生效。
+3. **WSL 里不用装 Tailscale**：第 2 步的端口转发监听在 Windows 的所有网卡上，Tailscale 网卡也包括在内。
+4. **防火墙规则：只放行 Tailscale 地址段**。Windows 通常把 Tailscale 网卡归为"公用网络"，第 2 步的 `-Profile Private` 规则对它不生效。
    这里改用一条 `-Profile Any`（任何网络类型都生效）的规则，但加上 `-RemoteAddress 100.64.0.0/10`：
    这是 Tailscale 给设备分配的地址段，**只有登录了你 Tailscale 账号的设备能连进来**；
    即使笔记本连着咖啡馆、机场等公共 Wi-Fi，同一 Wi-Fi 上的陌生设备也访问不了 8765 端口。
@@ -169,23 +142,16 @@ Tailscale 会在手机和笔记本之间建一条加密的虚拟局域网，两�
    ```powershell
    New-NetFirewallRule -DisplayName "Recon3D server 8765 Tailscale" -Direction Inbound -Protocol TCP -LocalPort 8765 -Action Allow -Profile Any -RemoteAddress 100.64.0.0/10
    ```
-   第 3 步那条 `-Profile Private` 的 Wi-Fi 规则可以保留（两种方式都能用），也可以不建。
+   第 2 步那条 `-Profile Private` 的 Wi-Fi 规则可以保留（两种方式都能用），也可以不建。
    撤销：`Remove-NetFirewallRule -DisplayName "Recon3D server 8765 Tailscale"`。
-5. **Hyper-V 入站规则同样只放行 Tailscale 地址段**（管理员 PowerShell，由你本人执行）：
-   ```powershell
-   New-NetFirewallHyperVRule -Name Recon3D8765TS -DisplayName "Recon3D 8765 Tailscale" -Direction Inbound -VMCreatorId '{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}' -Protocol TCP -LocalPorts 8765 -RemoteAddresses 100.64.0.0/10 -Action Allow
-   ```
-   检查：`Get-NetFirewallHyperVRule -Name Recon3D8765TS`；撤销：`Remove-NetFirewallHyperVRule -Name Recon3D8765TS`。
-   如果已经按第 3 步（续）建了不限地址的 `Recon3D8765`，它已经覆盖 Tailscale，这一条可以不建；
-   想让笔记本在公共 Wi-Fi 上更安全，可删掉 `Recon3D8765`、只保留这条。
-6. **查笔记本的 Tailscale 地址**：PowerShell 运行
+5. **查笔记本的 Tailscale 地址**：PowerShell 运行
 
    ```powershell
    tailscale ip -4
    ```
 
    会输出一个 `100.` 开头的地址，例如 `100.101.102.103`。
-7. 手机浏览器打开 `http://100.101.102.103:8765/api/v1/health`（换成你的地址），看到 health JSON 即成功。
+6. 手机浏览器打开 `http://100.101.102.103:8765/api/v1/health`（换成你的地址），看到 health JSON 即成功。
    在 App 的设置页里填 `100.101.102.103:8765` 即可（见 03-phone.md）。
 
 连不上时：两边 Tailscale App 是否都显示 "Connected"、是否同一账号；在笔记本上 `tailscale status` 能否看到手机；其余同上面的"打不开怎么办"。

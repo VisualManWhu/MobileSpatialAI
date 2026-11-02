@@ -1,5 +1,6 @@
 package dev.recon3d.net
 
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
@@ -111,6 +112,7 @@ class ApiClient(
                 throw ApiException(MSG_UNPARSEABLE, e)
             } catch (e: IOException) {
                 // Refused, unknown host, timeout, no route, connection dropped mid-transfer.
+                Log.w(TAG, "request failed: ${request.method} ${request.url}", e)
                 throw ApiException(MSG_UNREACHABLE, e)
             }
         }
@@ -128,6 +130,7 @@ class ApiClient(
     private inline fun <reified T> decode(text: String): T = json.decodeFromString(text)
 
     companion object {
+        private const val TAG = "ApiClient"
         const val MSG_UNREACHABLE = "连不上计算端，请检查 Wi-Fi 和地址"
         const val MSG_UNPARSEABLE = "计算端返回的数据无法解析"
         const val MSG_BAD_ADDRESS = "计算端地址格式不正确"

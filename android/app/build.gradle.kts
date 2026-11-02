@@ -24,6 +24,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+
+    testOptions {
+        // JVM unit tests hit android.util.Log (ApiClient logs network failures); make it a no-op.
+        unitTests.isReturnDefaultValues = true
+    }
 }
 
 dependencies {

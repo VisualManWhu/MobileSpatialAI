@@ -47,18 +47,18 @@
 
 详细步骤和命令见 [docs/setup/01-server-laptop.md](../setup/01-server-laptop.md)，这里只列要点：
 
-- [ ] 网络二选一：Wi-Fi 标记为"专用网络"，或使用 Tailscale
-- [ ] 防火墙放行 8765：Wi-Fi 方式用 `New-NetFirewallRule ... -Profile Private`；Tailscale 方式用 `-Profile Any -RemoteAddress 100.64.0.0/10`（只允许 Tailscale 设备）
-- [ ] Hyper-V 入站只放行 8765 端口：Wi-Fi 方式 `New-NetFirewallHyperVRule -Name Recon3D8765 ... -LocalPorts 8765`；Tailscale 方式 `-Name Recon3D8765TS ... -RemoteAddresses 100.64.0.0/10`（**不要**用整台 WSL 放行的 `Set-NetFirewallHyperVVMSetting ... -DefaultInboundAction Allow`）
-- [ ] 规则加好后运行 `wsl --shutdown`，再重启服务端（实测：不重启 WSL，Hyper-V 规则不生效）
-- 期望：`Get-NetFirewallHyperVRule -Name Recon3D8765`（或 `Recon3D8765TS`）显示 `LocalPorts : 8765`、`Action : Allow`
-- 撤销：`Remove-NetFirewallHyperVRule -Name Recon3D8765`；`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`（Tailscale 规则名为 `"Recon3D server 8765 Tailscale"`）
+- [x] `.wslconfig` 不用镜像模式（`networkingMode=NAT`）——2026-11-02 实测镜像模式时通时不通并劫持 8765，已切换
+- [x] 端口转发 `netsh interface portproxy add v4tov4 listenport=8765 ... connectport=18765 connectaddress=127.0.0.1`
+- [x] 网络二选一：Wi-Fi 标记为"专用网络"，或使用 Tailscale
+- [x] 防火墙放行 8765：Wi-Fi 方式用 `New-NetFirewallRule ... -Profile Private`；Tailscale 方式用 `-Profile Any -RemoteAddress 100.64.0.0/10`（只允许 Tailscale 设备）
+- 实测：手机浏览器与 App 均连通（`192.168.178.16:8765`，已连接：RTX 4060 Laptop GPU（笔记本档））
+- 撤销：`netsh interface portproxy delete v4tov4 listenport=8765 listenaddress=0.0.0.0`；`Remove-NetFirewallRule -DisplayName "Recon3D server 8765"`（Tailscale 规则名为 `"Recon3D server 8765 Tailscale"`）
 
 ### 2) 手机浏览器检查服务端
 
-- [ ] 在 Ubuntu 运行 `bash server/scripts/run.sh`，窗口保持打开
-- [ ] 手机浏览器打开 `http://<IP>:8765/api/v1/health`
-- 期望：返回 JSON，其中 `gpu` 含 "RTX 4060"
+- [x] 在 Ubuntu 运行 `bash server/scripts/run.sh`，窗口保持打开
+- [x] 手机浏览器打开 `http://<IP>:8765/api/v1/health`
+- 期望：返回 JSON，其中 `gpu` 含 "RTX 4060" —— 实测通过（2026-11-02）
 
 ### 3) 手机装 Tailscale（选了 Tailscale 才做）
 
@@ -67,9 +67,9 @@
 
 ### 4) 安装 App 并连接
 
-- [ ] 按 [docs/setup/03-phone.md](../setup/03-phone.md) 用 Android Studio 安装 APK
-- [ ] 设置页填地址（不写端口也行，会补成 `:8765`），点"测试连接"
-- 期望：显示"已连接：RTX 4060 Laptop GPU（笔记本档）"（App 只去掉 GPU 名称里的 NVIDIA 和 GeForce）
+- [x] 按 [docs/setup/03-phone.md](../setup/03-phone.md) 安装 APK（实测用 `adb install`，Pixel 10 Pro / Android 16）
+- [x] 设置页填地址（不写端口也行，会补成 `:8765`），点"测试连接"
+- 期望：显示"已连接：RTX 4060 Laptop GPU（笔记本档）"（App 只去掉 GPU 名称里的 NVIDIA 和 GeForce）—— 实测通过
 - [ ] 地址为空时点上传：弹出"请先在设置中填写计算端地址"并跳到设置页
 
 ### 5) 拍摄界面
