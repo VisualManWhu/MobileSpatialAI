@@ -110,6 +110,11 @@ class JobStore:
             return None
         return JobStatus(**raw)
 
+    def list(self) -> list[JobStatus]:
+        """Every job with a readable status.json, newest first (leftover dirs are skipped)."""
+        found = [s for d in self.jobs_dir.iterdir() if (s := self.get(d.name)) is not None]
+        return sorted(found, key=lambda s: s.created_at, reverse=True)
+
     def update(self, job_id: str, **fields) -> JobStatus:
         with self._lock:
             old = self.get(job_id)

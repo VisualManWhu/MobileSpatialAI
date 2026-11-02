@@ -1,5 +1,8 @@
 # 服务端 API（前缀 `/api/v1`）
 
+**状态页**：浏览器打开 `http://<服务端地址>/`（不带 `/api/v1`，例如笔记本上 `http://127.0.0.1:8765/`），
+列出所有任务的状态、进度、说明、创建时间、拍摄包大小，完成的任务可直接下载 `scene.splat`，每 5 秒自动刷新。
+
 ## GET /health
 
 ```json
@@ -20,6 +23,15 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
 - `400`：上传不完整或 multipart 格式错误
 
 上传按流式解析直接写入磁盘；无 `Content-Length`（分块传输）时同样在超过上限的瞬间返回 413。
+
+## GET /jobs
+
+所有任务，最新的在前（给状态页用，手机不用）：
+
+```json
+{"jobs":[{"job_id":"3f9c0a1b2d4e","state":"done","progress":1.0,"message":"完成",
+          "created_at":1793628538.96,"capture_bytes":71075878,"has_scene":true}]}
+```
 
 ## GET /jobs/{id}
 

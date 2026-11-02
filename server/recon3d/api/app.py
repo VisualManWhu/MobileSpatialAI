@@ -5,9 +5,10 @@ from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 
 from recon3d import __version__
+from recon3d.api.status_page import HTML as STATUS_PAGE
 from recon3d.api.upload import FORM_OVERHEAD, receive_capture
 from recon3d.api.upload import too_large as _too_large
 from recon3d.config import Profile
@@ -65,6 +66,27 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
         job_id = await receive_capture(request, store)
         return {"job_id": job_id}
 
+    @api.get("/jobs")
+    def list_jobs():
+        """Every job, newest first, for the status page (not used by the phone)."""
+        out = []
+        for s in store.list():
+            d = store.job_dir(s.job_id)
+            try:
+                size = (d / "capture.zip").stat().st_size
+            except OSError:
+                size = 0
+            out.append({
+                "job_id": s.job_id,
+                "state": s.state,
+                "progress": s.progress,
+                "message": s.message,
+                "created_at": s.created_at,
+                "capture_bytes": size,
+                "has_scene": s.state == "done" and (d / "scene.splat").is_file(),
+            })
+        return {"jobs": out}
+
     @api.get("/jobs/{job_id}")
     def get_job(job_id: str):
         s = status_or_404(job_id)
@@ -77,6 +99,10 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
         if s.state != "done" or not path.is_file():
             raise HTTPException(409, NOT_DONE)
         return FileResponse(path, media_type="application/octet-stream", filename="scene.splat")
+
+    @app.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def status_page():
+        return STATUS_PAGE
 
     app.include_router(api)
     return app

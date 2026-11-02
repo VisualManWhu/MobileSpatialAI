@@ -188,3 +188,12 @@ def test_start_twice_runs_one_thread(store):
     finally:
         w.stop()
     assert not any(t.name == "recon3d-worker" for t in threading.enumerate())
+
+
+def test_list_newest_first_and_skips_junk_dirs(store):
+    a = store.create(io.BytesIO(b"a"))
+    time.sleep(0.01)
+    b = store.create(io.BytesIO(b"b"))
+    (store.jobs_dir / "deadbeef0000").mkdir()  # aborted upload leftover: no status.json
+    (store.jobs_dir / ".DS_Store").write_bytes(b"")
+    assert [s.job_id for s in store.list()] == [b, a]

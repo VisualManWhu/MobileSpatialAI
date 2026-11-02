@@ -181,3 +181,22 @@ def test_oversize_stream_stops_reading_at_cap(tmp_path):
     assert sent[0]["status"] == 413
     assert pulled < 100 < len(chunks)  # cap + 64 KiB form allowance ≈ 66 chunks
     assert list((tmp_path / "data" / "jobs").iterdir()) == []
+
+
+def test_list_jobs(client):
+    assert client.get("/api/v1/jobs").json() == {"jobs": []}
+    jid = client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    wait_until(lambda: client.get(f"/api/v1/jobs/{jid}").json()["state"] == "done")
+    jobs = client.get("/api/v1/jobs").json()["jobs"]
+    assert len(jobs) == 1
+    j = jobs[0]
+    assert j["job_id"] == jid and j["state"] == "done" and j["progress"] == 1.0
+    assert j["capture_bytes"] == 3 and j["has_scene"] is True
+    assert isinstance(j["created_at"], float)
+
+
+def test_status_page_is_html(client):
+    r = client.get("/")
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("text/html")
+    assert "任务" in r.text and "/api/v1/jobs" in r.text
