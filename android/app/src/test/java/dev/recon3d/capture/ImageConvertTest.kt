@@ -64,4 +64,18 @@ class ImageConvertTest {
         assertEquals(1, pickCameraConfigIndex(listOf(intArrayOf(4032, 3024), intArrayOf(2560, 1440))))
         assertEquals(-1, pickCameraConfigIndex(emptyList()))
     }
+
+    @Test fun plane8StripsRowPadding() {
+        // 3x2 Y8 plane with rowStride 5; last row unpadded (as Android returns it)
+        val data = plane(3, 2, rowStride = 5, pixelStride = 1) { x, y -> 10 * y + x + 200 }
+        assertArrayEquals(
+            byteArrayOf(200.toByte(), 201.toByte(), 202.toByte(), 210.toByte(), 211.toByte(), 212.toByte()),
+            ImageConvert.plane8(data, 3, 2, 5),
+        )
+    }
+
+    @Test fun plane8TightIsCopy() {
+        val data = byteArrayOf(1, 2, 3, 4)
+        assertArrayEquals(data, ImageConvert.plane8(data, 2, 2, 2))
+    }
 }

@@ -31,11 +31,21 @@ class FrameJob(
     val fx: Float, val fy: Float, val cx: Float, val cy: Float,
 )
 
-/** [intrinsics]: optional `[fx, fy, cx, cy]` in depth-image pixels (see [DepthIntrinsics]). */
+/**
+ * [intrinsics]: optional `[fx, fy, cx, cy]` in depth-image pixels (see [DepthIntrinsics]).
+ * [kind]: `"raw"` (ARCore raw depth, holes = 0) or `"smooth"` (hole-filled depth).
+ * [confidence]: raw Y8 confidence plane bytes (row stride [confRowStride]); only for `"raw"`.
+ */
 class DepthBytes(
     val data: ByteArray, val width: Int, val height: Int, val rowStrideBytes: Int,
     val intrinsics: FloatArray? = null,
+    val kind: String = "smooth",
+    val confidence: ByteArray? = null,
+    val confRowStride: Int = 0,
 )
+
+/** Raw depth is produced at a lower rate than camera frames; it is only usable when computed for this frame. */
+fun rawDepthIsFresh(rawTs: Long, frameTs: Long): Boolean = rawTs == frameTs
 
 /** Depth-image intrinsics: GPU-texture intrinsics scaled to the depth resolution. */
 object DepthIntrinsics {
@@ -95,7 +105,12 @@ class CapturePipeline(
                 val jpeg = encodeJpeg(job)
                 val d = job.depth?.takeIf { it.width == depthW && it.height == depthH }
                 val depth = d?.let { ImageConvert.depth16ToMm(it.data, it.width, it.height, it.rowStrideBytes) }
-                w.addFrame(job.tNs, jpeg, depth, job.pose, job.fx, job.fy, job.cx, job.cy, depthIntrinsics = d?.intrinsics)
+                w.addFrame(
+                    job.tNs, jpeg, depth, job.pose, job.fx, job.fy, job.cx, job.cy,
+                    depthIntrinsics = d?.intrinsics,
+                    depthKind = d?.kind ?: "smooth",
+                    confidence = d?.confidence?.let { ImageConvert.plane8(it, d.width, d.height, d.confRowStride) },
+                )
                 _kept.value++
             } catch (e: CancellationException) {
                 throw e

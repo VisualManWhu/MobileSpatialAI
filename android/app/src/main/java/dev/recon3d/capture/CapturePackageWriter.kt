@@ -15,7 +15,7 @@ import java.util.zip.Deflater
 import java.util.zip.ZipEntry
 import java.util.zip.ZipOutputStream
 
-/** Writes a capture package (docs/capture-format.md, format v1). Frames are staged in [dir], then zipped by [finish]. */
+/** Writes a capture package (docs/capture-format.md, format v2). Frames are staged in [dir], then zipped by [finish]. */
 class CapturePackageWriter(
     private val dir: File,
     private val roomId: String,
@@ -32,7 +32,7 @@ class CapturePackageWriter(
     private val framesFile = File(dir, "frames.jsonl")
 
     init {
-        File(dir, "images").mkdirs(); File(dir, "depth").mkdirs()
+        File(dir, "images").mkdirs(); File(dir, "depth").mkdirs(); File(dir, "conf").mkdirs()
         framesFile.writeText("")
     }
 
@@ -40,9 +40,13 @@ class CapturePackageWriter(
         tNs: Long, jpeg: ByteArray, depthMm: ShortArray?, poseGl: FloatArray,
         fx: Float, fy: Float, cx: Float, cy: Float,
         depthIntrinsics: FloatArray? = null,
+        depthKind: String = "smooth",
+        confidence: ByteArray? = null,
     ) {
         require(poseGl.size == 16) { "pose must have 16 floats" }
         require(depthIntrinsics == null || depthIntrinsics.size == 4) { "depthIntrinsics must be [fx, fy, cx, cy]" }
+        require(depthKind == "raw" || depthKind == "smooth") { "depthKind must be raw or smooth" }
+        require(confidence == null || depthMm != null) { "confidence given without depth" }
         val index = ++count
         val name = "%06d".format(index)
         val imageRel = "images/$name.jpg"
@@ -52,6 +56,12 @@ class CapturePackageWriter(
             require(depthW != null && depthH != null) { "depth given but depth size not configured" }
             depthRel = "depth/$name.png"
             File(dir, depthRel).writeBytes(Png16.encode(depthW, depthH, depthMm))
+        }
+        var confRel: String? = null
+        if (confidence != null) {
+            require(confidence.size == depthW!! * depthH!!) { "confidence size != depthW*depthH" }
+            confRel = "conf/$name.png"
+            File(dir, confRel).writeBytes(Png8.encode(depthW, depthH, confidence))
         }
         val line = buildJsonObject {
             put("index", index)
@@ -65,6 +75,9 @@ class CapturePackageWriter(
                 put("depth_fx", depthIntrinsics[0]); put("depth_fy", depthIntrinsics[1])
                 put("depth_cx", depthIntrinsics[2]); put("depth_cy", depthIntrinsics[3])
             }
+            // Format v2: depth source, written only when this frame has depth; confidence map path or null.
+            if (depthRel != null) put("depth_kind", depthKind)
+            put("confidence", confRel?.let { JsonPrimitive(it) } ?: JsonNull)
         }
         framesFile.appendText(line.toString() + "\n")
     }
@@ -74,7 +87,7 @@ class CapturePackageWriter(
         check(!finished) { "CapturePackageWriter.finish() already called" }
         finished = true
         val manifest: JsonObject = buildJsonObject {
-            put("format_version", 1)
+            put("format_version", 2)
             put("capture_id", captureId)
             put("room_id", roomId)
             put("kind", "model")

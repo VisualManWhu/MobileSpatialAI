@@ -7,8 +7,6 @@ import java.util.zip.Deflater
 
 /** Minimal 16-bit grayscale PNG encoder (Android Bitmap cannot write 16-bit PNGs). */
 object Png16 {
-    private val SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
-
     /** [pixels] row-major, size width*height, treated as unsigned 0..65535. */
     fun encode(width: Int, height: Int, pixels: ShortArray): ByteArray {
         require(width > 0 && height > 0 && pixels.size == width * height) { "pixel count != width*height" }
@@ -22,17 +20,42 @@ object Png16 {
                 raw[o++] = v.toByte()
             }
         }
-        val out = ByteArrayOutputStream(raw.size / 2 + 64)
+        return PngWriter.grayscale(width, height, bitDepth = 16, filteredRows = raw)
+    }
+}
+
+/** Minimal 8-bit grayscale PNG encoder (confidence maps; avoids Android Bitmap so it runs in JVM tests). */
+object Png8 {
+    /** [pixels] row-major, size width*height, treated as unsigned 0..255. */
+    fun encode(width: Int, height: Int, pixels: ByteArray): ByteArray {
+        require(width > 0 && height > 0 && pixels.size == width * height) { "pixel count != width*height" }
+        val raw = ByteArray(height * (1 + width))
+        for (y in 0 until height) {
+            val o = y * (1 + width)
+            raw[o] = 0 // filter type 0 (None)
+            System.arraycopy(pixels, y * width, raw, o + 1, width)
+        }
+        return PngWriter.grayscale(width, height, bitDepth = 8, filteredRows = raw)
+    }
+}
+
+/** Shared PNG container code: signature, IHDR/IDAT/IEND chunks, zlib deflate. */
+internal object PngWriter {
+    private val SIGNATURE = byteArrayOf(0x89.toByte(), 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A)
+
+    /** [filteredRows]: each row prefixed with its filter-type byte, as stored in IDAT before compression. */
+    fun grayscale(width: Int, height: Int, bitDepth: Int, filteredRows: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream(filteredRows.size / 2 + 64)
         out.write(SIGNATURE)
         val hdr = ByteArrayOutputStream(13)
         DataOutputStream(hdr).apply {
             writeInt(width); writeInt(height)
-            writeByte(16) // bit depth
+            writeByte(bitDepth)
             writeByte(0)  // color type: grayscale
             writeByte(0); writeByte(0); writeByte(0) // compression, filter, interlace
         }
         chunk(out, "IHDR", hdr.toByteArray())
-        chunk(out, "IDAT", deflate(raw))
+        chunk(out, "IDAT", deflate(filteredRows))
         chunk(out, "IEND", ByteArray(0))
         return out.toByteArray()
     }

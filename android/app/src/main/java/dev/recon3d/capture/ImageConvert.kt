@@ -50,4 +50,14 @@ object ImageConvert {
         }
         return out
     }
+
+    /**
+     * Single-byte-per-pixel plane (e.g. Y8 `Frame.acquireRawDepthConfidenceImage()`) → tight `width*height`
+     * bytes, dropping the row padding when [rowStride] > [width].
+     */
+    fun plane8(data: ByteArray, width: Int, height: Int, rowStride: Int): ByteArray {
+        val out = ByteArray(width * height)
+        for (r in 0 until height) System.arraycopy(data, r * rowStride, out, r * width, width)
+        return out
+    }
 }

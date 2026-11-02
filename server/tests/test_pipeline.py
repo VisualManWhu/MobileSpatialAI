@@ -1,11 +1,13 @@
 import shutil
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
-from recon3d.capture.format import CaptureFormatError
+from recon3d.capture.format import CaptureFormatError, load_capture
 from recon3d.config import PROFILES
 from recon3d.jobs.pipeline import run_pipeline
+from recon3d.recon.dataset import build_training_set
 from tests.fixtures.make_capture import make_capture
 
 
@@ -77,3 +79,18 @@ def test_gpu_cache_released_after_each_job_oom_then_success(tmp_path, monkeypatc
     assert store.get(b).state == "done"
     assert calls["empty_cache"] == 2  # once per job, failed one included
     assert not (store.job_dir(a) / "capture").exists()
+
+
+def test_android_v2_fixture_trains_with_raw_confidence(tmp_path):
+    # Produced by CapturePackageWriterTest.writesV2SampleForServerContract (Android JVM test).
+    cap = load_capture(Path(__file__).parent / "fixtures" / "android_v2.zip", tmp_path / "w")
+    assert cap.manifest.format_version == 2
+    assert [f.depth_kind for f in cap.frames] == ["raw", "smooth"]
+    assert cap.frames[0].confidence == "conf/000001.png" and cap.frames[1].confidence is None
+    ts = build_training_set(cap, PROFILES["laptop"])
+    assert ts.images.shape[0] == 2
+    assert all(d is not None for d in ts.depths)
+    assert ts.confs[0].shape == ts.depths[0].shape
+    assert ts.confs[0].numpy() == pytest.approx(200 / 255)  # constant map from the PNG
+    assert ts.confs[1] is not None  # heuristic confidence for smooth depth
+    assert not (ts.confs[1].numpy() == pytest.approx(200 / 255))

@@ -64,6 +64,12 @@ class CaptureRenderer(
     /** Pipeline for which the intrinsics were already logged (log once per capture). */
     private var intrinsicsLoggedFor: CapturePipeline? = null
 
+    /** Raw-depth acquisitions for the current pipeline: fresh (used) vs stale/unavailable (smooth fallback). */
+    private var rawFresh = 0
+    private var rawStale = 0
+    private var rawStatsFor: CapturePipeline? = null
+    private var wasRecording = false
+
     /** GL thread only (use `queueEvent`). */
     fun skipStage() {
         guide.skipStage()
@@ -109,7 +115,11 @@ class CaptureRenderer(
         try {
             if (!_depthReady.value && tracking) probeDepthSize(frame, t)
             val p = pipeline
-            if (!recording || !_depthReady.value || p == null) return
+            val rec = recording
+            if (wasRecording && !rec) logRawDepthStats()
+            wasRecording = rec
+            if (p !== rawStatsFor) { logRawDepthStats(); rawStatsFor = p }
+            if (!rec || !_depthReady.value || p == null) return
             if (selector.shouldKeep(t, pose, tracking) && p.hasRoom()) {
                 buildJob(frame, camera, t, logIntrinsics = intrinsicsLoggedFor !== p)?.let {
                     intrinsicsLoggedFor = p
@@ -167,18 +177,51 @@ class CaptureRenderer(
     }
 
     /**
+     * Prefers ARCore raw depth + confidence when it was computed for this very frame ([rawDepthIsFresh]);
+     * otherwise falls back to the smoothed depth (`kind = "smooth"`, no confidence).
      * ARCore depth is aligned with the GPU texture (ruling R28), so its intrinsics are
      * `camera.textureIntrinsics` scaled from textureIntrinsics.imageDimensions to the depth size.
      */
-    private fun acquireDepth(frame: Frame, camera: Camera): DepthBytes? = try {
-        frame.acquireDepthImage16Bits().use { d ->
-            val p = d.planes[0]
-            val ti = camera.textureIntrinsics
-            val k = DepthIntrinsics.scaled(ti.focalLength, ti.principalPoint, ti.imageDimensions, d.width, d.height)
-            DepthBytes(p.copyBytes(), d.width, d.height, p.rowStride, k)
+    private fun acquireDepth(frame: Frame, camera: Camera): DepthBytes? {
+        acquireRawDepth(frame, camera)?.let { rawFresh++; return it }
+        rawStale++
+        return try {
+            frame.acquireDepthImage16Bits().use { d ->
+                val p = d.planes[0]
+                DepthBytes(p.copyBytes(), d.width, d.height, p.rowStride, depthIntrinsics(camera, d))
+            }
+        } catch (_: NotYetAvailableException) {
+            null
+        }
+    }
+
+    /** Raw depth + Y8 confidence for this frame, or null if not yet available or computed for an earlier frame. */
+    private fun acquireRawDepth(frame: Frame, camera: Camera): DepthBytes? = try {
+        frame.acquireRawDepthImage16Bits().use { d ->
+            if (!rawDepthIsFresh(d.timestamp, frame.timestamp)) return null
+            frame.acquireRawDepthConfidenceImage().use { c ->
+                val p = d.planes[0]
+                val cp = c.planes[0]
+                DepthBytes(
+                    p.copyBytes(), d.width, d.height, p.rowStride, depthIntrinsics(camera, d),
+                    kind = "raw", confidence = cp.copyBytes(), confRowStride = cp.rowStride,
+                )
+            }
         }
     } catch (_: NotYetAvailableException) {
         null
+    }
+
+    private fun depthIntrinsics(camera: Camera, d: Image): FloatArray {
+        val ti = camera.textureIntrinsics
+        return DepthIntrinsics.scaled(ti.focalLength, ti.principalPoint, ti.imageDimensions, d.width, d.height)
+    }
+
+    /** Logs and resets the raw-depth counters (no-op when nothing was counted). */
+    private fun logRawDepthStats() {
+        if (rawFresh + rawStale == 0) return
+        Log.i(TAG, "raw depth: fresh $rawFresh / stale $rawStale")
+        rawFresh = 0; rawStale = 0
     }
 
     private fun logIntrinsicsOnce(img: Image, imgDims: IntArray, f: FloatArray, c: FloatArray, camera: Camera, depth: DepthBytes?) {

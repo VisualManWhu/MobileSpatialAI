@@ -2,6 +2,7 @@ package dev.recon3d.capture.ar
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Rule
@@ -84,5 +85,28 @@ class CapturePipelineTest {
         val p = pipeline(null) { byteArrayOf(1) }
         assertEquals(false, p.hasFrames())
         assertEquals(null, p.finish())
+    }
+
+    @Test fun rawDepthFreshnessIsTimestampEquality() {
+        assertTrue(rawDepthIsFresh(5, 5))
+        assertFalse(rawDepthIsFresh(4, 5))
+    }
+
+    @Test fun rawDepthConfidenceIsStrippedAndWritten() = runBlocking {
+        val p = pipeline(intArrayOf(2, 1)) { byteArrayOf(1) }
+        // Y8 confidence 2x1 with rowStride 4 (padding bytes must be stripped)
+        val conf = byteArrayOf(10, 250.toByte(), 0x55, 0x55)
+        p.submit(job(1, DepthBytes(le(9000) + le(1200), 2, 1, 4, kind = "raw", confidence = conf, confRowStride = 4)))
+        p.submit(job(2, DepthBytes(le(9000) + le(1200), 2, 1, 4)))
+        val zip = p.finish()!!
+        ZipFile(zip).use { z ->
+            val lines = z.getInputStream(z.getEntry("frames.jsonl")).bufferedReader().readLines()
+            assertTrue(lines[0].contains("\"depth_kind\":\"raw\""))
+            assertTrue(lines[0].contains("\"confidence\":\"conf/000001.png\""))
+            assertTrue(lines[1].contains("\"depth_kind\":\"smooth\"")); assertTrue(lines[1].contains("\"confidence\":null"))
+            val img = javax.imageio.ImageIO.read(z.getInputStream(z.getEntry("conf/000001.png")))
+            assertEquals(2, img.width); assertEquals(1, img.height)
+            assertEquals(10, img.raster.getSample(0, 0, 0)); assertEquals(250, img.raster.getSample(1, 0, 0))
+        }
     }
 }

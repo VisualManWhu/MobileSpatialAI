@@ -26,12 +26,12 @@ class CapturePackageWriterTest {
     private fun text(zip: File, name: String) =
         ZipFile(zip).use { z -> z.getInputStream(z.getEntry(name)).readBytes().decodeToString() }
 
-    @Test fun packageMatchesFormatV1() {
+    @Test fun packageMatchesFormatV2() {
         val w = writer()
         w.addFrame(1, jpeg(), depth(4, 3), identity(), 500f, 500f, 320f, 240f)
         val zip = w.finish()
         val m = Json.parseToJsonElement(text(zip, "manifest.json")).jsonObject
-        assertEquals(1, m["format_version"]!!.jsonPrimitive.content.toInt())
+        assertEquals(2, m["format_version"]!!.jsonPrimitive.content.toInt())
         assertEquals(1, m["frame_count"]!!.jsonPrimitive.content.toInt())
         assertEquals("model", m["kind"]!!.jsonPrimitive.content)
         assertEquals("TestPhone", m["device"]!!.jsonPrimitive.content)
@@ -85,6 +85,33 @@ class CapturePackageWriterTest {
         }
     }
 
+    @Test fun rawDepthWithConfidenceAndSmoothWithout() {
+        val w = writer()
+        w.addFrame(1, jpeg(1), depth(4, 3), identity(), 500f, 500f, 320f, 240f, depthKind = "raw", confidence = ByteArray(12) { 200.toByte() })
+        w.addFrame(2, jpeg(2), depth(4, 3), identity(), 500f, 500f, 320f, 240f, depthKind = "smooth", confidence = null)
+        w.addFrame(3, jpeg(3), null, identity(), 500f, 500f, 320f, 240f)
+        val zip = w.finish()
+        val lines = text(zip, "frames.jsonl").lines().filter { it.isNotBlank() }
+        assertTrue(lines[0].contains("\"depth_kind\":\"raw\""))
+        assertTrue(lines[0].contains("\"confidence\":\"conf/000001.png\""))
+        assertTrue(lines[1].contains("\"depth_kind\":\"smooth\""))
+        assertTrue(lines[1].contains("\"confidence\":null"))
+        val f3 = Json.parseToJsonElement(lines[2]).jsonObject
+        assertFalse("depth_kind" in f3)
+        assertTrue(f3["confidence"] is JsonNull)
+        val names = entries(zip)
+        assertTrue("conf/000001.png" in names)
+        assertFalse(names.any { it == "conf/000002.png" || it == "conf/000003.png" })
+        val png = ZipFile(zip).use { z -> z.getInputStream(z.getEntry("conf/000001.png")).readBytes() }
+        val img = javax.imageio.ImageIO.read(png.inputStream())
+        assertEquals(4, img.width); assertEquals(3, img.height)
+        assertEquals(200, img.raster.getSample(3, 2, 0))
+    }
+
+    @Test(expected = IllegalArgumentException::class) fun confidenceSizeMustMatchDepth() {
+        writer().addFrame(1, jpeg(), depth(4, 3), identity(), 1f, 1f, 1f, 1f, depthKind = "raw", confidence = ByteArray(5))
+    }
+
     @Test fun finishDeletesStagingAndReturnsZip() {
         val stage = File(tmp.root, "stage")
         val w = writer(stage)
@@ -94,28 +121,43 @@ class CapturePackageWriterTest {
         assertFalse(stage.exists())
     }
 
-    /** Cross-language contract: produces the fixture consumed by server/tests/test_capture_format.py. */
-    @Test fun writesSampleForServerContract() {
+    /**
+     * Cross-language contract: produces server/tests/fixtures/android_v2.zip (consumed by test_pipeline.py):
+     * real JPEGs, frame 1 raw depth + confidence, frame 2 smooth. android_v1.zip is a frozen legacy fixture
+     * (this writer only emits v2 now).
+     */
+    @Test fun writesV2SampleForServerContract() {
         // Gradle runs unit tests with cwd = android/app
         val target = File(System.getProperty("recon3d.fixtureDir") ?: "../../server/tests/fixtures")
         if (!target.isDirectory) return // server dir not present: skip gracefully
         val w = CapturePackageWriter(
-            File(tmp.root, "sample"), "room-android", "cap-android", 64, 48, 8, 6,
-            device = "Android JVM test", createdAt = "2026-11-01T08:00:00Z",
+            File(tmp.root, "sample-v2"), "room-android", "cap-android-v2", 64, 48, 8, 6,
+            device = "Android JVM test", createdAt = "2026-11-02T08:00:00Z",
         )
-        val poses = listOf(identity(), translate(0.1f), pose(10f, 0f, 0.2f, 0f, 0f))
-        poses.forEachIndexed { i, p ->
+        listOf(identity(), translate(0.1f)).forEachIndexed { i, p ->
             w.addFrame(
-                (i + 1) * 200_000_000L, ByteArray(64) { (it * (i + 1)).toByte() },
+                (i + 1) * 200_000_000L, solidJpeg(64, 48, 0x40 * (i + 1)),
                 ShortArray(48) { (500 + it * 10 + i).toShort() }, p, 50f, 50f, 32f, 24f,
                 depthIntrinsics = floatArrayOf(6.5f, 6.5f, 4f, 3f),
+                depthKind = if (i == 0) "raw" else "smooth",
+                confidence = if (i == 0) ByteArray(48) { 200.toByte() } else null,
             )
         }
         val zip = w.finish()
-        val dest = File(target, "android_v1.zip")
+        val dest = File(target, "android_v2.zip")
         val bytes = zip.readBytes()
         if (!dest.isFile || !dest.readBytes().contentEquals(bytes)) dest.writeBytes(bytes)
-        assertEquals(3, entries(zip).count { it.startsWith("images/") })
+        assertTrue("conf/000001.png" in entries(zip))
+    }
+
+    /** Real (decodable) baseline JPEG of one grey level; ImageIO's encoder is deterministic. */
+    private fun solidJpeg(w: Int, h: Int, grey: Int): ByteArray {
+        val img = java.awt.image.BufferedImage(w, h, java.awt.image.BufferedImage.TYPE_INT_RGB)
+        val rgb = (grey shl 16) or (grey shl 8) or grey
+        for (y in 0 until h) for (x in 0 until w) img.setRGB(x, y, rgb)
+        val out = java.io.ByteArrayOutputStream()
+        check(javax.imageio.ImageIO.write(img, "jpg", out))
+        return out.toByteArray()
     }
 
     @Test(expected = IllegalStateException::class) fun doubleFinishIsRejected() {
