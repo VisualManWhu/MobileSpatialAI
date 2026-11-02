@@ -67,17 +67,32 @@ class PoseHistory(private val windowNs: Long = DEFAULT_WINDOW_NS) {
         while (times.isNotEmpty() && tNs - times.first() > windowNs) { times.removeFirst(); poses.removeFirst() }
     }
 
-    /** Pose recorded for exactly [tNs], or null when that frame was never seen or has aged out. */
+    /**
+     * Pose of the recorded frame nearest to [tNs] within [MATCH_TOLERANCE_NS], or null when no frame is
+     * that close (never seen, or aged out). Measured on Pixel 10 Pro: a raw depth image's timestamp is
+     * ~1.5 ms BEFORE its camera frame's timestamp, so exact equality never matches; 8 ms is a quarter
+     * of the 33 ms frame interval, far from the neighbouring frames.
+     */
     fun lookup(tNs: Long): FloatArray? {
-        val i = times.indexOf(tNs)
-        return if (i < 0) null else poses[i].copyOf()
+        var best = -1
+        var bestDelta = Long.MAX_VALUE
+        for (i in times.indices) {
+            val d = kotlin.math.abs(times[i] - tNs)
+            if (d < bestDelta) { bestDelta = d; best = i }
+        }
+        return if (best < 0 || bestDelta > MATCH_TOLERANCE_NS) null else poses[best].copyOf()
     }
 
     fun clear() { times.clear(); poses.clear() }
 
+    /** Signed ns from [tNs] to the nearest recorded timestamp (diagnostic), or null when empty. */
+    fun nearestDeltaNs(tNs: Long): Long? = times.minByOrNull { kotlin.math.abs(it - tNs) }?.let { it - tNs }
+
     companion object {
         /** 2 s: raw depth lag measured on Pixel 10 Pro is at most ~1.8 s. */
         const val DEFAULT_WINDOW_NS = 2_000_000_000L
+        /** 8 ms: raw depth timestamps sit ~1.5 ms off their frame's timestamp (Pixel 10 Pro). */
+        const val MATCH_TOLERANCE_NS = 8_000_000L
     }
 }
 

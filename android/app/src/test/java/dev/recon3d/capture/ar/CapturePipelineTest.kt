@@ -89,15 +89,20 @@ class CapturePipelineTest {
 
     private fun p16(x: Float) = floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, x, 0f, 0f, 1f)
 
-    @Test fun poseHistoryLooksUpExactTimestampAndCopies() {
+    @Test fun poseHistoryLooksUpNearestTimestampWithinToleranceAndCopies() {
         val h = PoseHistory()
+        val ms = 1_000_000L
         val p = p16(0.5f)
-        h.record(100, p)
+        h.record(100 * ms, p)
         p[12] = 9f // caller's buffer is reused by the renderer; the history must have copied it
-        h.record(200, p16(0.7f))
-        assertEquals(0.5f, h.lookup(100)!![12], 0f)
-        assertEquals(0.7f, h.lookup(200)!![12], 0f)
-        assertEquals(null, h.lookup(150))
+        h.record(133 * ms, p16(0.7f))
+        assertEquals(0.5f, h.lookup(100 * ms)!![12], 0f)
+        assertEquals(0.7f, h.lookup(133 * ms)!![12], 0f)
+        // Pixel 10 Pro: raw depth timestamps are ~1.5 ms before their frame's timestamp
+        assertEquals(0.7f, h.lookup(133 * ms - 1_500_000L)!![12], 0f)
+        assertEquals(0.5f, h.lookup(100 * ms + 7_900_000L)!![12], 0f)
+        assertEquals(null, h.lookup(116 * ms)) // 16 ms from both: outside tolerance
+        assertEquals(null, h.lookup(100 * ms - 8_100_000L))
         assertEquals(2, h.size)
     }
 
@@ -116,18 +121,20 @@ class CapturePipelineTest {
     @Test fun rawDepthMatcherPairsOwnPoseOnceAndRejectsStale() {
         val h = PoseHistory()
         val m = RawDepthMatcher(h)
-        h.record(100, p16(1f)); h.record(133, p16(2f)); h.record(166, p16(3f))
-        assertEquals(null, m.match(50)) // never seen -> stale
-        // keyframe at t=166 gets a raw image computed for t=100: pair it with the pose of t=100
-        assertEquals(1f, m.match(100)!![12], 0f)
+        val ms = 1_000_000L
+        h.record(100 * ms, p16(1f)); h.record(133 * ms, p16(2f)); h.record(166 * ms, p16(3f))
+        assertEquals(null, m.match(50 * ms)) // never seen -> stale
+        // keyframe at t=166 gets a raw image computed for t=100 (timestamped ~1.5 ms earlier): pair it
+        // with the pose of t=100
+        assertEquals(1f, m.match(100 * ms - 1_500_000L)!![12], 0f)
         // next keyframe still sees the same raw image -> duplicate, fall back to smooth
-        assertTrue(m.isDuplicate(100))
-        assertEquals(null, m.match(100))
-        assertFalse(m.isDuplicate(133))
-        assertEquals(2f, m.match(133)!![12], 0f)
+        assertTrue(m.isDuplicate(100 * ms - 1_500_000L))
+        assertEquals(null, m.match(100 * ms - 1_500_000L))
+        assertFalse(m.isDuplicate(133 * ms))
+        assertEquals(2f, m.match(133 * ms)!![12], 0f)
         m.reset()
-        assertFalse(m.isDuplicate(133))
-        assertEquals(2f, m.match(133)!![12], 0f)
+        assertFalse(m.isDuplicate(133 * ms))
+        assertEquals(2f, m.match(133 * ms)!![12], 0f)
     }
 
     @Test fun depthPoseIsWrittenOnlyForRawDepth() = runBlocking {

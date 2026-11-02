@@ -218,7 +218,16 @@ class CaptureRenderer(
             rawLagMs.add((frame.timestamp - d.timestamp) / 1_000_000)
             if (d.timestamp != lastRawTs) { rawUpdates++; lastRawTs = d.timestamp }
             if (rawMatcher.isDuplicate(d.timestamp)) { rawDup++; return null }
-            val depthPose = rawMatcher.match(d.timestamp) ?: run { rawStale++; return null }
+            val depthPose = rawMatcher.match(d.timestamp) ?: run {
+                rawStale++
+                if (rawStale <= 5) {
+                    // Diagnostic: is the raw timestamp on the camera-frame clock at all?
+                    val near = poseHistory.nearestDeltaNs(d.timestamp)
+                    Log.i(TAG, "raw ts ${d.timestamp} frame ts ${frame.timestamp} nearest recorded delta " +
+                        (near?.let { "${it / 1000} us" } ?: "none") + " (history ${poseHistory.size})")
+                }
+                return null
+            }
             frame.acquireRawDepthConfidenceImage().use { c ->
                 val p = d.planes[0]
                 val cp = c.planes[0]
