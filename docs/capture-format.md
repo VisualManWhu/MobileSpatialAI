@@ -58,7 +58,10 @@ ARCore CPU 图像，传感器原始方向（横屏），不旋转。文件缺失
   `"raw"` 为 ARCore Raw Depth（未平滑、未填洞）；`"smooth"` 为 `acquireDepthImage16Bits` 的平滑深度。
 - `confidence`: 路径（如 `"conf/000001.png"`）或 null。8 位灰度 PNG，与深度图同尺寸，0..255，255 最可信；
   没有 raw depth 的帧为 null。有 `confidence` 时文件必须存在，缺失报“缺少置信度图”。
-- 对 v1 包和 `confidence` 为 null 的帧，服务端使用启发式置信度（见后续置信度处理）。
+- 对 v1 包和 `confidence` 为 null 的帧，服务端使用启发式置信度：按像素与 4 邻域的最大深度跳变 g 计算
+  1 − g / 10 cm，裁剪到 0..1（跳变 ≥ 10 cm 时为 0，其间线性）。
+- 无论置信度来自哪里，深度超过 4 m 的像素置信度为 0，既不参与初始点云，也不参与深度损失。
+- 没有深度的帧省略 `depth_kind` 字段。
 
 ```json
 {"index":1,"t_ns":33000000,"image":"images/000001.jpg","depth":"depth/000001.png",
