@@ -89,7 +89,7 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile) -> dict:
         psnr[i] = 10.0 * np.log10(1.0 / max(mse, 1e-12))
         del img
 
-    xyz, _ = init_points(ts)
+    xyz, _ = init_points(ts, min_points=0)
     alpha = torch.sigmoid(splats.opacities).cpu().numpy()
     means = splats.means.cpu().numpy()[alpha > FLOATER_OPACITY]
     del splats

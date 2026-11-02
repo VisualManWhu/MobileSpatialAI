@@ -84,6 +84,51 @@ def test_depth_loss_none_when_not_divisible():
     assert depth_loss(torch.zeros(1, 7, 8), torch.zeros(3, 4), torch.ones(3, 4)) is None
 
 
+def _depth_ts(depth_K=None, dh=48, dw=64, H=192, W=256, confs=True):
+    from recon3d.recon.dataset import TrainingSet
+    K = torch.tensor([[200.0, 0, 128.0], [0, 200.0, 96.0], [0, 0, 1]])[None]
+    return TrainingSet(
+        images=torch.zeros(1, H, W, 3),
+        K=K,
+        c2w=torch.eye(4)[None],
+        depths=[torch.ones(dh, dw)],
+        depth_K=None if depth_K is None else [depth_K],
+        confs=[torch.ones(dh, dw)] if confs else [None],
+    )
+
+
+def _scaled_K(sx=0.25, sy=0.25, fx_mul=1.0):
+    return torch.tensor([[200.0 * sx * fx_mul, 0, 128.0 * sx], [0, 200.0 * sy, 96.0 * sy], [0, 0, 1]])
+
+
+def test_depth_loss_usable_without_depth_K():
+    from recon3d.recon.trainer import _depth_loss_usable
+    assert _depth_loss_usable(_depth_ts(), 0, 192, 256)
+    ts = _depth_ts()
+    ts.depth_K = [None]
+    assert _depth_loss_usable(ts, 0, 192, 256)
+
+
+def test_depth_loss_usable_with_scaled_depth_K():
+    from recon3d.recon.trainer import _depth_loss_usable
+    assert _depth_loss_usable(_depth_ts(depth_K=_scaled_K()), 0, 192, 256)
+
+
+def test_depth_loss_not_usable_with_mismatched_depth_K():
+    from recon3d.recon.trainer import _depth_loss_usable
+    assert not _depth_loss_usable(_depth_ts(depth_K=_scaled_K(fx_mul=1.05)), 0, 192, 256)
+
+
+def test_depth_loss_not_usable_when_not_divisible():
+    from recon3d.recon.trainer import _depth_loss_usable
+    assert not _depth_loss_usable(_depth_ts(dh=50, dw=64), 0, 192, 256)
+
+
+def test_depth_loss_not_usable_without_confs():
+    from recon3d.recon.trainer import _depth_loss_usable
+    assert not _depth_loss_usable(_depth_ts(confs=False), 0, 192, 256)
+
+
 @pytest.mark.gpu
 def test_trains_with_depth_loss_and_pose_refine(synthetic_ts, caplog):
     # Depth at 1/4 image resolution so the loss exercises the avg-pool path.
@@ -98,6 +143,10 @@ def test_trains_with_depth_loss_and_pose_refine(synthetic_ts, caplog):
         splats = train(ts, p, on_progress=lambda p: None)
     assert splats.means.shape[0] > 0
     assert any("位姿修正" in r.getMessage() for r in caplog.records)
+    assert any("旋转中位数" in r.getMessage() for r in caplog.records)
+    n_depth = sum(d is not None for d in ts.depths)
+    assert any(f"深度约束用于 {n_depth}/{n_depth} 个有深度的帧" in r.getMessage() for r in caplog.records)
+    assert not any("深度约束跳过" in r.getMessage() for r in caplog.records)
     legacy = dataclasses.replace(PROFILES["laptop"], iterations=300, depth_lambda=0.0, pose_lr=0.0)
     assert train(ts, legacy, on_progress=lambda p: None).means.shape[0] > 0
 

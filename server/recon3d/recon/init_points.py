@@ -47,7 +47,7 @@ def init_points(
         d = depth.detach().cpu().numpy().astype(np.float64)
         dh, dw = d.shape
         c = conf.detach().cpu().numpy()
-        valid = (c >= conf_min) & (d > 0) & np.isfinite(d)
+        valid = (c > 0) & (c >= conf_min) & (d > 0) & np.isfinite(d)
         v, u = np.nonzero(valid)
         if len(v) == 0:
             continue

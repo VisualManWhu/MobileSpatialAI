@@ -130,6 +130,36 @@ def depth_loss(
     return (conf * h).sum() / n
 
 
+def _depth_loss_usable(ts: TrainingSet, i: int, H: int, W: int) -> bool:
+    """Whether frame i's depth map can be compared with a depth render using the image K.
+
+    depth_loss average-pools the render to the depth grid, which assumes the depth map
+    spans exactly the image field of view. That holds when no depth_K is given or when
+    depth_K[i] equals K[i] scaled by (dw/W, dh/H): focal lengths within 1 % relative,
+    principal point within 0.5 depth pixels. Sizes must also divide evenly.
+    """
+    depth = ts.depths[i]
+    conf = ts.confs[i] if i < len(ts.confs) else None
+    if depth is None or conf is None:
+        return False
+    dh, dw = depth.shape[-2:]
+    if H % dh or W % dw:
+        return False
+    dK = ts.depth_K[i] if ts.depth_K is not None else None
+    if dK is None:
+        return True
+    dK = dK.detach().cpu().double()
+    K = ts.K[i].detach().cpu().double()
+    sx, sy = dw / W, dh / H
+    fx, fy, cx, cy = float(K[0, 0]) * sx, float(K[1, 1]) * sy, float(K[0, 2]) * sx, float(K[1, 2]) * sy
+    return (
+        abs(float(dK[0, 0]) - fx) <= 0.01 * abs(fx)
+        and abs(float(dK[1, 1]) - fy) <= 0.01 * abs(fy)
+        and abs(float(dK[0, 2]) - cx) <= 0.5
+        and abs(float(dK[1, 2]) - cy) <= 0.5
+    )
+
+
 def _log_pose_stats(pose: PoseRefine | None) -> None:
     if pose is None:
         return
@@ -137,7 +167,7 @@ def _log_pose_stats(pose: PoseRefine | None) -> None:
     rot = torch.rad2deg(d[:, :3].norm(dim=1))
     trans = d[:, 3:].norm(dim=1) * 100.0
     log.info(
-        "位姿修正：旋转 中位数 %.3f° / 最大 %.3f°，平移 中位数 %.2f cm / 最大 %.2f cm",
+        "位姿修正：旋转中位数 %.3f° / 最大 %.3f°，平移中位数 %.2f cm / 最大 %.2f cm",
         float(rot.median()), float(rot.max()), float(trans.median()), float(trans.max()),
     )
 
@@ -250,6 +280,23 @@ def train(
     # Pose refinement starts with densification, once the initial cloud has settled.
     pose: PoseRefine | None = None
     pose_opt = None
+    # Depth usability is decided once per frame; per-step cost is a list lookup.
+    has_depth = [ts.depths[i] is not None for i in range(n_img)]
+    depth_ok = [use_depth and _depth_loss_usable(ts, i, H, W) for i in range(n_img)]
+    depth_used = [False] * n_img
+    warned_skip = False
+
+    def _warn_skip(i: int) -> None:
+        nonlocal warned_skip
+        if not warned_skip:
+            log.warning("深度约束跳过：帧 %d 的深度图与图像不对齐或尺寸不整除", i)
+            warned_skip = True
+
+    if use_depth:
+        for i in range(n_img):
+            if has_depth[i] and not depth_ok[i]:
+                _warn_skip(i)
+                break
 
     for step in range(iters):
         if pose is None and profile.pose_lr > 0 and step >= strategy.refine_start_iter:
@@ -267,10 +314,13 @@ def train(
         l1 = (img - gt).abs().mean()
         ssim_v = ssim(img.permute(0, 3, 1, 2), gt.permute(0, 3, 1, 2), window)
         loss = (1.0 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * (1.0 - ssim_v)
-        if use_depth and ts.depths[i] is not None and ts.confs[i] is not None:
+        if depth_ok[i]:
             dl = depth_loss(out[..., 3], ts.depths[i].to(device), ts.confs[i].to(device))
             if dl is not None:
                 loss = loss + profile.depth_lambda * dl
+                depth_used[i] = True
+            else:
+                _warn_skip(i)
         if pose is not None:
             loss = loss + POSE_REG * pose.reg()
         loss.backward()
@@ -294,5 +344,7 @@ def train(
         if (step + 1) % PROGRESS_EVERY == 0 or step + 1 == iters:
             on_progress((step + 1) / iters)
 
+    if use_depth:
+        log.info("深度约束用于 %d/%d 个有深度的帧", sum(depth_used), sum(has_depth))
     _log_pose_stats(pose)
     return Splats(**{k: v.detach() for k, v in params.items()})
