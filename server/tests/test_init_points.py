@@ -11,7 +11,8 @@ def _ts(depths, n=2, H=40, W=60):
     c2w = torch.eye(4).repeat(n, 1, 1)
     c2w[1, 0, 3] = 0.5
     return TrainingSet(
-        images=torch.rand(n, H, W, 3), K=K, c2w=c2w, depths=depths
+        images=torch.rand(n, H, W, 3), K=K, c2w=c2w, depths=depths,
+        confs=[None if d is None else torch.ones_like(d) for d in depths],
     )
 
 
@@ -67,3 +68,32 @@ def test_depth_intrinsics_used_when_present(tmp_path):
     assert np.allclose(xyz[:, 2], -1.5, atol=0.01)  # identity GL pose looks down -Z
     # u in 0..7, cx=4, depth 1.5 m: x = (u-4)/3.125*1.5 -> min -1.92 (scaled K would give -0.96)
     assert xyz[:, 0].min() == pytest.approx(-1.92, abs=0.02)
+
+
+def test_init_points_drops_low_confidence(tmp_path):
+    from recon3d.capture.format import load_capture
+    from recon3d.config import PROFILES
+    from recon3d.recon.dataset import build_training_set
+    from tests.fixtures.make_capture import make_capture
+
+    depth = np.full((6, 8), 1500, np.uint16)
+    conf = np.full((6, 8), 255, np.uint8); conf[:, :4] = 0
+    z = make_capture(tmp_path, n_frames=1, format_version=2, depths=[depth], confidences=[conf])
+    ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
+    xyz, _ = init_points(ts, voxel_size=0.001, min_points=0)
+    # right half only: x in camera frame >= 0 for u >= cx (cx = dw/2 scaled)
+    assert len(xyz) == 6 * 4
+    assert (xyz[:, 0] >= -1e-6).all()
+
+
+def test_init_points_v1_drops_far_and_edges(tmp_path):
+    from recon3d.capture.format import load_capture
+    from recon3d.config import PROFILES
+    from recon3d.recon.dataset import build_training_set
+    from tests.fixtures.make_capture import make_capture
+
+    depth = np.full((6, 8), 1500, np.uint16); depth[:, 6:] = 5000  # 5 m: beyond 4 m, plus an edge at col 5|6
+    z = make_capture(tmp_path, n_frames=1, depths=[depth])
+    ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
+    xyz, _ = init_points(ts, voxel_size=0.001, min_points=0)
+    assert len(xyz) == 6 * 5  # columns 0..4 survive

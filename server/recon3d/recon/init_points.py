@@ -5,7 +5,9 @@ import numpy as np
 
 from recon3d.recon.dataset import TrainingSet
 
-MAX_DEPTH_M = 8.0
+# Minimum per-pixel confidence (0..1) for a depth sample to seed a Gaussian.
+# confs already encode the valid range (0.3..MAX_DEPTH_M) and the depth-edge penalty.
+CONF_MIN = 0.5
 
 
 def _voxel_mean(xyz: np.ndarray, rgb: np.ndarray, voxel: float) -> tuple[np.ndarray, np.ndarray]:
@@ -21,9 +23,13 @@ def _voxel_mean(xyz: np.ndarray, rgb: np.ndarray, voxel: float) -> tuple[np.ndar
 
 
 def init_points(
-    ts: TrainingSet, voxel_size: float = 0.02, min_points: int = 5000, seed: int = 0
+    ts: TrainingSet,
+    voxel_size: float = 0.02,
+    min_points: int = 5000,
+    seed: int = 0,
+    conf_min: float = CONF_MIN,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Back-project depths (meters, 0 = invalid, >8 m dropped) to world space.
+    """Back-project depths (meters), keeping pixels with confidence >= conf_min to world space.
 
     Returns (xyz [M,3], rgb [M,3] in 0..1), float32. If fewer than min_points
     survive, pads with seeded uniform random gray points in the camera bbox + 1 m.
@@ -35,11 +41,13 @@ def init_points(
 
     xyz_all, rgb_all = [], []
     for i, depth in enumerate(ts.depths):
-        if depth is None:
+        conf = ts.confs[i]
+        if depth is None or conf is None:
             continue
         d = depth.detach().cpu().numpy().astype(np.float64)
         dh, dw = d.shape
-        valid = (d > 0) & (d <= MAX_DEPTH_M) & np.isfinite(d)
+        c = conf.detach().cpu().numpy()
+        valid = (c >= conf_min) & (d > 0) & np.isfinite(d)
         v, u = np.nonzero(valid)
         if len(v) == 0:
             continue
