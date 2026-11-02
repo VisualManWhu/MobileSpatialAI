@@ -62,3 +62,27 @@ def test_depth_aspect_mismatch_with_intrinsics_kept(tmp_path):
     assert ts.depths[0] is not None
     assert ts.depth_K[0][0, 0] == pytest.approx(12.0)
     assert ts.depth_K[0][1, 2] == pytest.approx(4.5)
+
+
+def test_training_set_confs_from_png(tmp_path):
+    conf = [np.full((6, 8), 128, np.uint8)]
+    z = make_capture(tmp_path, n_frames=1, format_version=2, confidences=conf,
+                     depths=[np.full((6, 8), 1500, np.uint16)])
+    ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
+    assert ts.confs[0].shape == (6, 8)
+    assert abs(float(ts.confs[0][0, 0]) - 128 / 255) < 1e-6
+
+
+def test_training_set_confs_heuristic_for_v1(tmp_path):
+    z = make_capture(tmp_path, n_frames=1, depths=[np.full((6, 8), 1500, np.uint16)])
+    ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
+    assert float(ts.confs[0].min()) == 1.0  # flat depth, no edges
+
+
+def test_conf_size_mismatch_skips_depth(tmp_path, caplog):
+    conf = [np.full((3, 4), 255, np.uint8)]
+    z = make_capture(tmp_path, n_frames=1, format_version=2, confidences=conf,
+                     depths=[np.full((6, 8), 1500, np.uint16)])
+    ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
+    assert ts.depths[0] is None and ts.confs[0] is None
+    assert "confidence" in caplog.text

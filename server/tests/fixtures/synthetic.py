@@ -84,8 +84,10 @@ def _build_ts(gt, c2ws: torch.Tensor, W: int, H: int, device: str) -> TrainingSe
     Ks = K.expand(len(c2ws), 3, 3).contiguous()
     with torch.no_grad():
         rgb, depth = _render(gt, c2ws, Ks, W, H)
+    depths = [d.contiguous() for d in depth]
     return TrainingSet(
-        images=rgb.contiguous(), K=Ks, c2w=c2ws, depths=[d.contiguous() for d in depth]
+        images=rgb.contiguous(), K=Ks, c2w=c2ws, depths=depths,
+        confs=[torch.ones_like(d) for d in depths],
     )
 
 

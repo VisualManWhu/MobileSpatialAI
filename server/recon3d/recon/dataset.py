@@ -11,6 +11,7 @@ from PIL import Image
 from recon3d.capture.format import Capture
 from recon3d.capture.poses import gl_to_cv_c2w
 from recon3d.config import Profile
+from recon3d.recon.confidence import depth_confidence
 
 log = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class TrainingSet:
         aspect ratio does not match the image and no depth intrinsics were given).
     depth_K: optional per-frame [3,3] intrinsics in depth-image pixels (or None per frame).
         When absent/None, back-projection uses the image K scaled by dw/W and dh/H.
+    confs: per-frame [dh,dw] float32 confidence in 0..1 matching depths (None where depth is None).
     """
 
     images: torch.Tensor
@@ -36,6 +38,7 @@ class TrainingSet:
     c2w: torch.Tensor
     depths: list[torch.Tensor | None]
     depth_K: list[torch.Tensor | None] | None = field(default=None)
+    confs: list[torch.Tensor | None] = field(default_factory=list)
 
 
 def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> TrainingSet:
@@ -45,7 +48,7 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
     h = max(1, round(m.image_height * scale))
     sx, sy = w / m.image_width, h / m.image_height
 
-    images, Ks, poses, depths, depth_Ks = [], [], [], [], []
+    images, Ks, poses, depths, depth_Ks, confs = [], [], [], [], [], []
     for fr in cap.frames:
         with Image.open(cap.root / fr.image) as im:
             im = im.convert("RGB")
@@ -57,10 +60,25 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
         if fr.depth is None:
             depths.append(None)
             depth_Ks.append(None)
+            confs.append(None)
             continue
         with Image.open(cap.root / fr.depth) as d:
             arr = np.asarray(d, dtype=np.float32) / 1000.0  # 16-bit mm -> m
         dh, dw = arr.shape[:2]
+        conf_u8 = None
+        if fr.confidence is not None:
+            with Image.open(cap.root / fr.confidence) as c:
+                conf_u8 = np.asarray(c.convert("L"), dtype=np.uint8)
+            if conf_u8.shape != (dh, dw):
+                log.warning(
+                    "frame %d: confidence map %dx%d does not match depth %dx%d; "
+                    "skipping depth for this frame",
+                    fr.index, conf_u8.shape[1], conf_u8.shape[0], dw, dh,
+                )
+                depths.append(None)
+                depth_Ks.append(None)
+                confs.append(None)
+                continue
         dk = (fr.depth_fx, fr.depth_fy, fr.depth_cx, fr.depth_cy)
         if all(v is not None for v in dk):
             dfx, dfy, dcx, dcy = dk
@@ -76,9 +94,11 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
                 )
                 depths.append(None)
                 depth_Ks.append(None)
+                confs.append(None)
                 continue
             depth_Ks.append(None)
         depths.append(torch.from_numpy(arr).to(device))
+        confs.append(torch.from_numpy(depth_confidence(arr, conf_u8)).to(device))
 
     return TrainingSet(
         images=torch.from_numpy(np.stack(images)).to(device),
@@ -86,4 +106,5 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
         c2w=torch.tensor(np.stack(poses), dtype=torch.float32, device=device),
         depths=depths,
         depth_K=depth_Ks,
+        confs=confs,
     )
