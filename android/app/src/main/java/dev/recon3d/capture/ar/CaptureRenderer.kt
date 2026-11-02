@@ -14,16 +14,15 @@ import com.google.ar.core.exceptions.SessionPausedException
 import dev.recon3d.capture.CaptureStatus
 import dev.recon3d.capture.KeyframeSelector
 import dev.recon3d.capture.MotionMonitor
-import dev.recon3d.capture.PointCloudAccumulator
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import javax.microedition.khronos.egl.EGLConfig
 import javax.microedition.khronos.opengles.GL10
 
 /**
- * GL-thread frame loop: session.update → camera feed → [MotionMonitor] → (when recording) accumulate the
- * ARCore point cloud and, for [KeyframeSelector] keyframes, copy image bytes into a [FrameJob] for
- * [CapturePipeline]. [monitor] and [selector] are only touched on the GL thread.
+ * GL-thread frame loop: session.update → camera feed → [MotionMonitor] → (when recording) [KeyframeSelector]
+ * → copy image bytes into a [FrameJob] for [CapturePipeline]. [monitor] and [selector] are only touched on
+ * the GL thread.
  */
 class CaptureRenderer(
     private val assets: AssetManager,
@@ -33,8 +32,6 @@ class CaptureRenderer(
 ) : GLSurfaceView.Renderer {
     private val monitor = MotionMonitor()
     private val selector = KeyframeSelector()
-    /** ARCore feature points seen while recording (for the post-capture preview); cleared with the pipeline. */
-    val cloud = PointCloudAccumulator()
     private val background = BackgroundRenderer()
     private val pose = FloatArray(16)
     private var lastTimestamp = 0L
@@ -130,7 +127,6 @@ class CaptureRenderer(
             wasRecording = rec
             if (p !== rawStatsFor) { logRawDepthStats(); rawStatsFor = p }
             if (!rec || !_depthReady.value || p == null) return
-            if (tracking) frame.acquirePointCloud().use { pc -> cloud.add(pc.points, pc.ids, pc.timestamp) }
             if (selector.shouldKeep(t, pose, tracking) && p.hasRoom()) {
                 buildJob(frame, camera, t, logIntrinsics = intrinsicsLoggedFor !== p)?.let {
                     intrinsicsLoggedFor = p
@@ -176,11 +172,6 @@ class CaptureRenderer(
             val f = intr.focalLength
             val c = intr.principalPoint
             if (logIntrinsics) logIntrinsicsOnce(img, intr.imageDimensions, f, c, camera, depth)
-            // Give the preview cloud's new points the luma of this keyframe's pixel they land on.
-            cloud.colorize(
-                pose, f[0] * sx, f[1] * sy, c[0] * sx, c[1] * sy,
-                img.width, img.height, yP.buffer, yP.rowStride, yP.pixelStride,
-            )
             FrameJob(
                 tNs = t, width = img.width, height = img.height,
                 y = yP.copyBytes(), yRowStride = yP.rowStride, yPixelStride = yP.pixelStride,

@@ -40,7 +40,7 @@ fun PreviewScreen(record: CaptureRecord, onUpload: () -> Unit, onRetake: () -> U
                 SceneViewer(path)
             } else {
                 Text(
-                    "这次拍摄没有采集到特征点（ARCore 没有跟踪到画面）",
+                    "这次拍摄没有生成点云（没有深度数据，或保存失败）",
                     color = Color.White, textAlign = TextAlign.Center,
                     modifier = Modifier.align(Alignment.Center).padding(24.dp),
                 )

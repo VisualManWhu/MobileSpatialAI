@@ -26,8 +26,17 @@ class CapturePipelineTest {
 
     private fun pipeline(depth: IntArray?, encode: (FrameJob) -> ByteArray) = CapturePipeline(
         stagingDir = tmp.root.resolve("room/cap-1"), roomId = "room", captureId = "cap-1", device = "test",
-        depthSize = { depth }, encodeJpeg = encode, log = { _, _ -> },
+        depthSize = { depth }, encodeJpeg = { job, _ -> encode(job) }, log = { _, _ -> },
     )
+
+    @Test fun previewCloudCollectsDepthKeyframesInRange() = runBlocking {
+        val p = pipeline(intArrayOf(2, 1)) { byteArrayOf(1) }
+        p.submit(job(1, DepthBytes(le(1500) + le(1500), 2, 1, 4)))   // 1.5 m: both pixels valid, step 2 keeps (0,0)
+        p.submit(job(2, DepthBytes(le(9000) + le(0), 2, 1, 4)))      // 9 m / invalid: nothing
+        p.finish()
+        assertEquals(2, p.kept.value)
+        assertEquals(1, p.cloud.size)
+    }
 
     @Test fun failedJobIsSkippedAndCaptureContinues() = runBlocking {
         val p = pipeline(null) { j -> if (j.tNs == 2L) error("encoder boom") else byteArrayOf(1, 2, 3) }

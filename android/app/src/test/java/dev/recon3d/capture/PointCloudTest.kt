@@ -1,86 +1,86 @@
 package dev.recon3d.capture
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.nio.ByteBuffer
 import java.nio.ByteOrder
-import java.nio.FloatBuffer
-import java.nio.IntBuffer
 
 class PointCloudTest {
-    private fun cloud(vararg pts: FloatArray): Pair<FloatBuffer, IntBuffer> {
-        // each entry: id, x, y, z, confidence
-        val f = FloatBuffer.allocate(4 * pts.size)
-        val ids = IntBuffer.allocate(pts.size)
-        for (p in pts) { ids.put(p[0].toInt()); f.put(p[1]); f.put(p[2]); f.put(p[3]); f.put(p[4]) }
-        f.flip(); ids.flip()
-        return f to ids
+    private val dw = 4; private val dh = 2
+    private val w = 8; private val h = 4
+    private val k = floatArrayOf(2f, 2f, 2f, 1f) // fx, fy, cx, cy in depth pixels
+
+    /** NV21 image where every pixel is the same colour (Y, U, V). */
+    private fun nv21(y: Int, u: Int, v: Int): ByteArray {
+        val b = ByteArray(w * h * 3 / 2)
+        for (i in 0 until w * h) b[i] = y.toByte()
+        var o = w * h
+        while (o < b.size) { b[o] = v.toByte(); b[o + 1] = u.toByte(); o += 2 }
+        return b
     }
 
-    @Test fun dedupesByIdFiltersConfidenceAndSkipsRepeatedTimestamp() {
-        val acc = PointCloudAccumulator()
-        val (f1, i1) = cloud(floatArrayOf(7f, 1f, 2f, 3f, 0.9f), floatArrayOf(8f, 0f, 0f, 0f, 0.05f))
-        acc.add(f1, i1, timestamp = 100)
-        assertEquals(1, acc.size) // id 8 below confidence
-        val (f2, i2) = cloud(floatArrayOf(7f, 1.5f, 2f, 3f, 0.9f), floatArrayOf(9f, 4f, 5f, 6f, 0.5f))
-        acc.add(f2, i2, timestamp = 100) // same cloud again: ignored
-        assertEquals(1, acc.size)
-        acc.add(f2, i2, timestamp = 200)
-        assertEquals(2, acc.size)
-        val s = acc.snapshot()
-        assertEquals(1.5f, s.xyz[0], 0f) // id 7 updated to its latest position
-        assertEquals(4f, s.xyz[3], 0f)
-        assertEquals(PointCloudAccumulator.DEFAULT_GRAY, s.gray[0].toInt() and 0xFF)
+    private fun depth(mm: Int) = ShortArray(dw * dh) { mm.toShort() }
+
+    @Test fun backProjectsWithPoseAndColoursFromImage() {
+        val c = DepthCloud(step = 1)
+        // all pixels 2 m away; camera at x = 1 looking down -Z; grey-ish red image (Y=100, V=+40)
+        val added = c.addKeyframe(depth(2000), null, dw, dh, k, translate(1f), nv21(100, 128, 168), w, h)
+        assertEquals(dw * dh, added)
+        val s = c.snapshot()
+        // depth pixel (2, 1) is the principal point: straight ahead -> world (1, 0, -2)
+        val i = 1 * dw + 2
+        assertEquals(1f, s.xyz[3 * i], 1e-6f); assertEquals(0f, s.xyz[3 * i + 1], 1e-6f); assertEquals(-2f, s.xyz[3 * i + 2], 1e-6f)
+        // depth pixel (3, 1): one pixel right of centre at fx = 2 -> x = +1 m in camera, world x = 2
+        assertEquals(2f, s.xyz[3 * (1 * dw + 3)], 1e-6f)
+        // depth pixel (2, 0): one pixel above centre (image y down) -> world y = +1
+        assertEquals(1f, s.xyz[3 * (0 * dw + 2) + 1], 1e-6f)
+        // colour: Y=100, V=168 -> R = 100 + 1.402*40 = 156, G = 100 - 0.714*40 = 71, B = 100
+        assertEquals(156, s.rgb[0].toInt() and 0xFF); assertEquals(71, s.rgb[1].toInt() and 0xFF); assertEquals(100, s.rgb[2].toInt() and 0xFF)
     }
 
-    @Test fun capsNewPoints() {
-        val acc = PointCloudAccumulator(maxPoints = 2)
-        val (f, i) = cloud(floatArrayOf(1f, 0f, 0f, 0f, 1f), floatArrayOf(2f, 0f, 0f, 0f, 1f), floatArrayOf(3f, 0f, 0f, 0f, 1f))
-        acc.add(f, i, 1)
-        assertEquals(2, acc.size)
+    @Test fun rotationOfPoseIsApplied() {
+        val c = DepthCloud(step = 1)
+        // camera turned 90 deg to the right: its -Z now points along world +X, so a point 2 m ahead is at world x = +2
+        c.addKeyframe(depth(2000), null, dw, dh, k, yaw(90f), nv21(0, 128, 128), w, h)
+        val s = c.snapshot()
+        val i = 1 * dw + 2 // principal point
+        assertEquals(2f, s.xyz[3 * i], 1e-5f); assertEquals(0f, s.xyz[3 * i + 1], 1e-5f); assertEquals(0f, s.xyz[3 * i + 2], 1e-5f)
     }
 
-    @Test fun colorizeSamplesLumaOfProjectedPixelOnlyForPointsInFront() {
-        val acc = PointCloudAccumulator()
-        // point A 2 m straight ahead of a camera at the origin (OpenGL: ahead = -Z); point B behind it
-        val (f, i) = cloud(floatArrayOf(1f, 0f, 0f, -2f, 1f), floatArrayOf(2f, 0f, 0f, 2f, 1f))
-        acc.add(f, i, 1)
-        val w = 8; val h = 6; val rowStride = 10; val pixelStride = 1
-        val y = ByteBuffer.allocate(rowStride * h)
-        val cx = 4f; val cy = 3f
-        y.put(3 * rowStride + 4, 200.toByte())
-        acc.colorize(identity(), fx = 10f, fy = 10f, cx = cx, cy = cy, width = w, height = h, y = y, rowStride = rowStride, pixelStride = pixelStride)
-        val s = acc.snapshot()
-        assertEquals(200, s.gray[0].toInt() and 0xFF)
-        assertEquals(PointCloudAccumulator.DEFAULT_GRAY, s.gray[1].toInt() and 0xFF)
-        // a later keyframe does not recolour an already coloured point
-        y.put(3 * rowStride + 4, 50.toByte())
-        acc.colorize(identity(), 10f, 10f, cx, cy, w, h, y, rowStride, pixelStride)
-        assertEquals(200, acc.snapshot().gray[0].toInt() and 0xFF)
+    @Test fun filtersRangeConfidenceAndInvalidAndDedupesVoxels() {
+        val c = DepthCloud(step = 1)
+        val d = depth(2000)
+        d[0] = 0            // invalid
+        d[1] = 100          // 10 cm: too close
+        d[2] = 6000         // 6 m: too far
+        val conf = ByteArray(dw * dh) { 255.toByte() }
+        conf[3] = 10        // low confidence
+        assertEquals(dw * dh - 4, c.addKeyframe(d, conf, dw, dh, k, identity(), nv21(0, 128, 128), w, h))
+        // the same keyframe again lands in the same voxels: nothing new
+        assertEquals(0, c.addKeyframe(d, conf, dw, dh, k, identity(), nv21(0, 128, 128), w, h))
+        assertEquals(dw * dh - 4, c.size)
     }
 
-    @Test fun colorizeUsesCameraPoseAndImageAxes() {
-        val acc = PointCloudAccumulator()
-        // camera at x=1 looking down -Z; a point 1 m ahead and 0.5 m to the camera's right, 0.25 m up
-        val (f, i) = cloud(floatArrayOf(1f, 1.5f, 0.25f, -1f, 1f))
-        acc.add(f, i, 1)
-        val w = 100; val h = 100; val y = ByteBuffer.allocate(w * h)
-        // fx = fy = 40, principal point (50, 50): expected u = 50 + 40*0.5 = 70, v = 50 - 40*0.25 = 40 (y down)
-        y.put(40 * w + 70, 123.toByte())
-        acc.colorize(translate(1f), 40f, 40f, 50f, 50f, w, h, y, rowStride = w, pixelStride = 1)
-        assertEquals(123, acc.snapshot().gray[0].toInt() and 0xFF)
+    @Test fun stepSubsamplesAndCapApplies() {
+        val c = DepthCloud(maxPoints = 3, step = 1)
+        assertEquals(3, c.addKeyframe(depth(1500), null, dw, dh, k, identity(), nv21(0, 128, 128), w, h))
+        c.clear()
+        assertEquals(0, c.size)
+        val c2 = DepthCloud(step = 2)
+        assertEquals(2, c2.addKeyframe(depth(1500), null, dw, dh, k, identity(), nv21(0, 128, 128), w, h)) // (0,0),(2,0)
     }
 
     @Test fun splatLayoutIs32BytesPerPoint() {
-        val snap = PointCloudSnapshot(floatArrayOf(1f, 2f, 3f), byteArrayOf(77))
+        val snap = PointCloudSnapshot(floatArrayOf(1f, 2f, 3f), byteArrayOf(10, 20, 30))
         val bytes = PointCloudSplat.encode(snap)
         assertEquals(32, bytes.size)
         val b = ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN)
         assertEquals(1f, b.getFloat(0), 0f); assertEquals(2f, b.getFloat(4), 0f); assertEquals(3f, b.getFloat(8), 0f)
         assertEquals(PointCloudSplat.POINT_SCALE_M, b.getFloat(12), 0f)
-        assertEquals(77, b.get(24).toInt() and 0xFF); assertEquals(77, b.get(26).toInt() and 0xFF)
+        assertEquals(10, b.get(24).toInt()); assertEquals(20, b.get(25).toInt()); assertEquals(30, b.get(26).toInt())
         assertEquals(255, b.get(27).toInt() and 0xFF) // opaque
         assertEquals(255, b.get(28).toInt() and 0xFF); assertEquals(128, b.get(29).toInt() and 0xFF) // identity quat
-        assertEquals(0, bytes.size % PointCloudSplat.STRIDE)
+        assertTrue(bytes.size % PointCloudSplat.STRIDE == 0)
     }
 }

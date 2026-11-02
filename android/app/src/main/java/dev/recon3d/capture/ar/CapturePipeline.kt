@@ -5,6 +5,7 @@ import android.graphics.Rect
 import android.graphics.YuvImage
 import android.util.Log
 import dev.recon3d.capture.CapturePackageWriter
+import dev.recon3d.capture.DepthCloud
 import dev.recon3d.capture.ImageConvert
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -139,9 +140,12 @@ class CapturePipeline(
     private val captureId: String,
     private val device: String,
     private val depthSize: () -> IntArray?,
-    private val encodeJpeg: (FrameJob) -> ByteArray = ::yuvJobToJpeg,
+    private val encodeJpeg: (FrameJob, ByteArray) -> ByteArray = { job, nv21 -> nv21ToJpeg(nv21, job.width, job.height) },
     private val log: (String, Throwable?) -> Unit = { m, e -> Log.w(TAG, m, e) },
 ) {
+    /** Coloured preview cloud back-projected from every keyframe's depth (see [DepthCloud]). */
+    val cloud = DepthCloud()
+
     private val queue = Channel<FrameJob>(Channel.UNLIMITED)
     private val pending = AtomicInteger(0)
     private val _kept = MutableStateFlow(0)
@@ -173,17 +177,23 @@ class CapturePipeline(
                         imageW = job.width, imageH = job.height, depthW = depthW, depthH = depthH, device = device,
                     ).also { writer = it }
                 }
-                val jpeg = encodeJpeg(job)
+                val nv21 = ImageConvert.yuv420ToNv21(
+                    job.width, job.height, job.y, job.yRowStride, job.yPixelStride,
+                    job.u, job.v, job.uvRowStride, job.uvPixelStride,
+                )
+                val jpeg = encodeJpeg(job, nv21)
                 val d = job.depth?.takeIf { it.width == depthW && it.height == depthH }
                 val depth = d?.let { ImageConvert.depth16ToMm(it.data, it.width, it.height, it.rowStrideBytes) }
+                val confidence = d?.confidence?.let { ImageConvert.plane8(it, d.width, d.height, d.confRowStride) }
                 w.addFrame(
                     job.tNs, jpeg, depth, job.pose, job.fx, job.fy, job.cx, job.cy,
                     depthIntrinsics = d?.intrinsics,
                     depthKind = d?.kind ?: "smooth",
-                    confidence = d?.confidence?.let { ImageConvert.plane8(it, d.width, d.height, d.confRowStride) },
+                    confidence = confidence,
                     depthPose = d?.pose,
                 )
                 _kept.value++
+                if (d != null && depth != null) addToCloud(job, d, depth, confidence, nv21)
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Exception) {
@@ -194,6 +204,19 @@ class CapturePipeline(
             }
         }
         writer?.finish()
+    }
+
+    /** Preview only: a failure here must not count against the keyframe, which is already written. */
+    private fun addToCloud(job: FrameJob, d: DepthBytes, depthMm: ShortArray, confidence: ByteArray?, nv21: ByteArray) {
+        try {
+            val k = d.intrinsics ?: floatArrayOf(
+                job.fx * d.width / job.width, job.fy * d.height / job.height,
+                job.cx * d.width / job.width, job.cy * d.height / job.height,
+            )
+            cloud.addKeyframe(depthMm, confidence, d.width, d.height, k, d.pose ?: job.pose, nv21, job.width, job.height)
+        } catch (e: Exception) {
+            log("preview cloud skipped keyframe t=${job.tNs}", e)
+        }
     }
 
     /** True if there is room for one more job; call before acquiring images to avoid wasted copies. */
@@ -236,14 +259,10 @@ class CapturePipeline(
 
 private const val JPEG_QUALITY = 90
 
-/** YUV_420_888 bytes → NV21 → JPEG (quality 90). Android-only (YuvImage). */
-fun yuvJobToJpeg(job: FrameJob): ByteArray {
-    val nv21 = ImageConvert.yuv420ToNv21(
-        job.width, job.height, job.y, job.yRowStride, job.yPixelStride,
-        job.u, job.v, job.uvRowStride, job.uvPixelStride,
-    )
-    val out = ByteArrayOutputStream(job.width * job.height / 4)
-    YuvImage(nv21, ImageFormat.NV21, job.width, job.height, null)
-        .compressToJpeg(Rect(0, 0, job.width, job.height), JPEG_QUALITY, out)
+/** NV21 → JPEG (quality 90). Android-only (YuvImage). */
+fun nv21ToJpeg(nv21: ByteArray, width: Int, height: Int): ByteArray {
+    val out = ByteArrayOutputStream(width * height / 4)
+    YuvImage(nv21, ImageFormat.NV21, width, height, null)
+        .compressToJpeg(Rect(0, 0, width, height), JPEG_QUALITY, out)
     return out.toByteArray()
 }

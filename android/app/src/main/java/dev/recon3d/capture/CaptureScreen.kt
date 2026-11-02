@@ -204,14 +204,14 @@ private class ArHost(private val activity: Activity, private val roomId: String)
         }
         if (zip != null) {
             finished = true
-            val snap = r.cloud.snapshot()
+            val snap = p.cloud.snapshot()
             val points = if (snap.size == 0) null else withContext(Dispatchers.IO) {
-                File(zip.parentFile, zip.nameWithoutExtension + POINTS_SUFFIX).also { f ->
-                    runCatching { f.writeBytes(PointCloudSplat.encode(snap)) }
-                        .onFailure { Log.w(TAG, "point cloud not written", it) }
-                }.takeIf { it.isFile }
+                val f = File(zip.parentFile, zip.nameWithoutExtension + POINTS_SUFFIX)
+                runCatching { f.writeBytes(PointCloudSplat.encode(snap)) }
+                    .onFailure { Log.w(TAG, "point cloud not written", it); f.delete() } // never keep a truncated file
+                f.takeIf { it.isFile }
             }
-            return FinishResult.Saved(CaptureOutput(zip, points, p.kept.value, snap.size))
+            return FinishResult.Saved(CaptureOutput(zip, points, p.kept.value, if (points == null) 0 else snap.size))
         }
         p.abandon()
         val fresh = newPipeline(r)
@@ -223,7 +223,6 @@ private class ArHost(private val activity: Activity, private val roomId: String)
     private fun newPipeline(r: CaptureRenderer): CapturePipeline {
         val captureId = "cap-" + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss-SSS"))
         val staging = File(activity.filesDir, "captures/$roomId/$captureId")
-        r.cloud.clear()
         return CapturePipeline(staging, roomId, captureId, Build.MODEL, depthSize = { r.depthSize })
     }
 

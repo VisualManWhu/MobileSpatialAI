@@ -5,6 +5,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
@@ -95,13 +96,17 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
             val roomId = entry.arguments?.getString("roomId") ?: return@composable
             val captureId = entry.arguments?.getString("captureId") ?: return@composable
             val record = runCatching { graph.rooms.capture(roomId, captureId) }.getOrNull() ?: return@composable
+            // Ignore the second tap of a double tap: once this entry is leaving, its buttons must not navigate again.
+            fun resumed() = entry.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
             PreviewScreen(
                 record = record,
                 onUpload = {
+                    if (!resumed()) return@PreviewScreen
                     withServer { graph.uploader.start(roomId, captureId) }
                     nav.popBackStack() // room shows the upload progress
                 },
                 onRetake = {
+                    if (!resumed()) return@PreviewScreen
                     graph.rooms.removeCapture(roomId, captureId)
                     File(record.zipPath).delete()
                     record.pointsPath?.let { File(it).delete() }
