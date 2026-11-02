@@ -286,16 +286,16 @@ def train(
     depth_used = [False] * n_img
     warned_skip = False
 
-    def _warn_skip(i: int) -> None:
+    def _warn_skip(i: int, reason: str) -> None:
         nonlocal warned_skip
         if not warned_skip:
-            log.warning("深度约束跳过：帧 %d 的深度图与图像不对齐或尺寸不整除", i)
+            log.warning("深度约束跳过：帧 %d %s（之后同类情况不再提示）", i, reason)
             warned_skip = True
 
     if use_depth:
         for i in range(n_img):
             if has_depth[i] and not depth_ok[i]:
-                _warn_skip(i)
+                _warn_skip(i, "的深度图与图像不对齐或尺寸不整除")
                 break
 
     for step in range(iters):
@@ -320,7 +320,7 @@ def train(
                 loss = loss + profile.depth_lambda * dl
                 depth_used[i] = True
             else:
-                _warn_skip(i)
+                _warn_skip(i, "没有可用的深度像素（置信度全为 0）")
         if pose is not None:
             loss = loss + POSE_REG * pose.reg()
         loss.backward()

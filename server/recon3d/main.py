@@ -30,8 +30,13 @@ def cli(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-upload-gb", type=float, default=DEFAULT_MAX_UPLOAD_BYTES / 1024**3)
     args = ap.parse_args(argv)
 
+    import logging
+
     import uvicorn
 
+    # Training progress/pose/depth-loss summaries are logged at INFO by recon3d.recon.*;
+    # without this only WARNING and above would reach the console.
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(name)s: %(message)s")
     app = build_app(PROFILES[args.profile], args.data_dir, int(args.max_upload_gb * 1024**3))
     uvicorn.run(app, host=args.host, port=args.port)
 

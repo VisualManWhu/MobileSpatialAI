@@ -67,6 +67,9 @@ class CaptureRenderer(
     /** Raw-depth acquisitions for the current pipeline: fresh (used) vs stale/unavailable (smooth fallback). */
     private var rawFresh = 0
     private var rawStale = 0
+    private val rawLagMs = ArrayList<Long>()
+    private var rawUpdates = 0
+    private var lastRawTs = 0L
     private var rawStatsFor: CapturePipeline? = null
     private var wasRecording = false
 
@@ -198,7 +201,12 @@ class CaptureRenderer(
     /** Raw depth + Y8 confidence for this frame, or null if not yet available or computed for an earlier frame. */
     private fun acquireRawDepth(frame: Frame, camera: Camera): DepthBytes? = try {
         frame.acquireRawDepthImage16Bits().use { d ->
-            if (!rawDepthIsFresh(d.timestamp, frame.timestamp)) return null
+            if (!rawDepthIsFresh(d.timestamp, frame.timestamp)) {
+                // Diagnostic: how far behind the camera frame the raw depth is, and how often it updates.
+                rawLagMs.add((frame.timestamp - d.timestamp) / 1_000_000)
+                if (d.timestamp != lastRawTs) { rawUpdates++; lastRawTs = d.timestamp }
+                return null
+            }
             frame.acquireRawDepthConfidenceImage().use { c ->
                 val p = d.planes[0]
                 val cp = c.planes[0]
@@ -220,8 +228,11 @@ class CaptureRenderer(
     /** Logs and resets the raw-depth counters (no-op when nothing was counted). */
     private fun logRawDepthStats() {
         if (rawFresh + rawStale == 0) return
-        Log.i(TAG, "raw depth: fresh $rawFresh / stale $rawStale")
-        rawFresh = 0; rawStale = 0
+        val lag = rawLagMs.sorted()
+        val lagText = if (lag.isEmpty()) "" else
+            "; lag ms min ${lag.first()} / median ${lag[lag.size / 2]} / max ${lag.last()}; distinct raw images ${rawUpdates}"
+        Log.i(TAG, "raw depth: fresh $rawFresh / stale $rawStale$lagText")
+        rawFresh = 0; rawStale = 0; rawLagMs.clear(); rawUpdates = 0; lastRawTs = 0L
     }
 
     private fun logIntrinsicsOnce(img: Image, imgDims: IntArray, f: FloatArray, c: FloatArray, camera: Camera, depth: DepthBytes?) {
