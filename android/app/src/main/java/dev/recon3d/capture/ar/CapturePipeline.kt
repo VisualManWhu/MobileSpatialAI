@@ -35,6 +35,9 @@ class FrameJob(
  * [intrinsics]: optional `[fx, fy, cx, cy]` in depth-image pixels (see [DepthIntrinsics]).
  * [kind]: `"raw"` (ARCore raw depth, holes = 0) or `"smooth"` (hole-filled depth).
  * [confidence]: raw Y8 confidence plane bytes (row stride [confRowStride]); only for `"raw"`.
+ * [pose]: world_from_camera of the camera frame the depth was computed for (16 floats, column-major,
+ * OpenGL), when it is not the keyframe's own pose. Raw depth lags the camera by 30-1800 ms on
+ * Pixel devices, so it must be paired with the pose of its own frame, not the keyframe's.
  */
 class DepthBytes(
     val data: ByteArray, val width: Int, val height: Int, val rowStrideBytes: Int,
@@ -42,10 +45,63 @@ class DepthBytes(
     val kind: String = "smooth",
     val confidence: ByteArray? = null,
     val confRowStride: Int = 0,
+    val pose: FloatArray? = null,
 )
 
-/** Raw depth is produced at a lower rate than camera frames; it is only usable when computed for this frame. */
-fun rawDepthIsFresh(rawTs: Long, frameTs: Long): Boolean = rawTs == frameTs
+/**
+ * Ring buffer of `(frame timestamp -> camera pose)` for every rendered frame, so a raw depth image
+ * (timestamped with the camera frame it was computed for, which is usually several frames behind)
+ * can be paired with the pose of that frame. Keeps entries newer than [windowNs] relative to the
+ * latest record. Single-threaded (GL thread).
+ */
+class PoseHistory(private val windowNs: Long = DEFAULT_WINDOW_NS) {
+    private val times = ArrayDeque<Long>()
+    private val poses = ArrayDeque<FloatArray>()
+
+    val size: Int get() = times.size
+
+    /** Records [pose] (copied) for frame [tNs]; drops entries older than the window. */
+    fun record(tNs: Long, pose: FloatArray) {
+        require(pose.size == 16) { "pose must have 16 floats" }
+        times.addLast(tNs); poses.addLast(pose.copyOf())
+        while (times.isNotEmpty() && tNs - times.first() > windowNs) { times.removeFirst(); poses.removeFirst() }
+    }
+
+    /** Pose recorded for exactly [tNs], or null when that frame was never seen or has aged out. */
+    fun lookup(tNs: Long): FloatArray? {
+        val i = times.indexOf(tNs)
+        return if (i < 0) null else poses[i].copyOf()
+    }
+
+    fun clear() { times.clear(); poses.clear() }
+
+    companion object {
+        /** 2 s: raw depth lag measured on Pixel 10 Pro is at most ~1.8 s. */
+        const val DEFAULT_WINDOW_NS = 2_000_000_000L
+    }
+}
+
+/**
+ * Decides whether a raw depth image can be used for a keyframe: its own frame's pose must still be in
+ * [history] and the same raw image (same timestamp) must not have been written already (a raw image
+ * persists across several camera frames; writing it twice would duplicate data).
+ */
+class RawDepthMatcher(private val history: PoseHistory) {
+    private var lastUsedTs = Long.MIN_VALUE
+
+    /** Pose for the raw image at [rawTs], or null (and no state change) when stale or already used. */
+    fun match(rawTs: Long): FloatArray? {
+        if (rawTs == lastUsedTs) return null
+        val p = history.lookup(rawTs) ?: return null
+        lastUsedTs = rawTs
+        return p
+    }
+
+    /** True when [rawTs] was returned by the last successful [match]. */
+    fun isDuplicate(rawTs: Long): Boolean = rawTs == lastUsedTs
+
+    fun reset() { lastUsedTs = Long.MIN_VALUE }
+}
 
 /** Depth-image intrinsics: GPU-texture intrinsics scaled to the depth resolution. */
 object DepthIntrinsics {
@@ -110,6 +166,7 @@ class CapturePipeline(
                     depthIntrinsics = d?.intrinsics,
                     depthKind = d?.kind ?: "smooth",
                     confidence = d?.confidence?.let { ImageConvert.plane8(it, d.width, d.height, d.confRowStride) },
+                    depthPose = d?.pose,
                 )
                 _kept.value++
             } catch (e: CancellationException) {

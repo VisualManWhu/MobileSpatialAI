@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import logging
 import math
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -130,18 +131,43 @@ def depth_loss(
     return (conf * h).sum() / n
 
 
-def _depth_loss_usable(ts: TrainingSet, i: int, H: int, W: int) -> bool:
-    """Whether frame i's depth map can be compared with a depth render using the image K.
+def _depth_view(ts: TrainingSet, i: int) -> torch.Tensor | None:
+    """c2w of frame i's depth map when it differs from c2w[i] (raw depth paired with its own pose)."""
+    dc2w = ts.depth_c2w[i] if i < len(ts.depth_c2w) else None
+    if dc2w is None:
+        return None
+    if torch.allclose(dc2w.detach().cpu(), ts.c2w[i].detach().cpu(), atol=1e-6):
+        return None
+    return dc2w
 
-    depth_loss average-pools the render to the depth grid, which assumes the depth map
-    spans exactly the image field of view. That holds when no depth_K is given or when
-    depth_K[i] equals K[i] scaled by (dw/W, dh/H): focal lengths within 1 % relative,
-    principal point within 0.5 depth pixels. Sizes must also divide evenly.
+
+def _depth_K(ts: TrainingSet, i: int, H: int, W: int) -> torch.Tensor:
+    """[3,3] intrinsics of frame i's depth map: depth_K[i] or K[i] scaled to the depth size."""
+    dK = ts.depth_K[i] if ts.depth_K is not None else None
+    if dK is not None:
+        return dK
+    dh, dw = ts.depths[i].shape[-2:]
+    S = torch.tensor([[dw / W, 0.0, 0.0], [0.0, dh / H, 0.0], [0.0, 0.0, 1.0]],
+                     dtype=ts.K.dtype, device=ts.K.device)
+    return S @ ts.K[i]
+
+
+def _depth_loss_usable(ts: TrainingSet, i: int, H: int, W: int) -> bool:
+    """Whether frame i's depth map can be compared with a depth render.
+
+    With its own depth pose (depth_c2w[i] differs from c2w[i]) the depth is rendered
+    directly at the depth map's size with the depth intrinsics, so only depth + confidence
+    are needed. Otherwise the colour render is average-pooled to the depth grid, which
+    assumes the depth map spans exactly the image field of view: no depth_K given, or
+    depth_K[i] equals K[i] scaled by (dw/W, dh/H) (focal lengths within 1 % relative,
+    principal point within 0.5 depth pixels), and the sizes must divide evenly.
     """
     depth = ts.depths[i]
     conf = ts.confs[i] if i < len(ts.confs) else None
     if depth is None or conf is None:
         return False
+    if _depth_view(ts, i) is not None:
+        return True
     dh, dw = depth.shape[-2:]
     if H % dh or W % dw:
         return False
@@ -275,14 +301,26 @@ def train(
     state = strategy.initialize_state(scene_scale=scene_scale)
     window = _gaussian_window(device=device)
     gen = torch.Generator().manual_seed(0)
+    t_start = time.monotonic()
     use_depth = profile.depth_lambda > 0
-    render_mode = "RGB+ED" if use_depth else "RGB"
     # Pose refinement starts with densification, once the initial cloud has settled.
     pose: PoseRefine | None = None
     pose_opt = None
     # Depth usability is decided once per frame; per-step cost is a list lookup.
     has_depth = [ts.depths[i] is not None for i in range(n_img)]
     depth_ok = [use_depth and _depth_loss_usable(ts, i, H, W) for i in range(n_img)]
+    # Frames whose depth was captured from its own pose get a second, depth-only render
+    # from that pose at the depth map's size (viewmat + K per frame, None = pooled path).
+    depth_vms = [None] * n_img
+    depth_Ks = [None] * n_img
+    for i in range(n_img):
+        if not depth_ok[i]:
+            continue
+        dv = _depth_view(ts, i)
+        if dv is not None:
+            depth_vms[i] = torch.linalg.inv(dv.to(device))[None]
+            depth_Ks[i] = _depth_K(ts, i, H, W).to(device)[None]
+    n_depth_view = sum(v is not None for v in depth_vms)
     depth_used = [False] * n_img
     warned_skip = False
 
@@ -305,8 +343,10 @@ def train(
         i = int(torch.randint(n_img, (1,), generator=gen))
         sh_deg = min(step // SH_DEGREE_INTERVAL, profile.sh_degree)
         vm = viewmats[i : i + 1]
+        idx = torch.tensor([i], device=device)
         if pose is not None:
-            vm = pose(vm, torch.tensor([i], device=device))
+            vm = pose(vm, idx)
+        render_mode = "RGB+ED" if depth_ok[i] and depth_vms[i] is None else "RGB"
         out, _, info = _rasterize(params, vm, Ks[i : i + 1], W, H, sh_deg, render_mode)
         img = out[..., :3]
         gt = images[i : i + 1].to(device, non_blocking=True)
@@ -315,7 +355,16 @@ def train(
         ssim_v = ssim(img.permute(0, 3, 1, 2), gt.permute(0, 3, 1, 2), window)
         loss = (1.0 - SSIM_LAMBDA) * l1 + SSIM_LAMBDA * (1.0 - ssim_v)
         if depth_ok[i]:
-            dl = depth_loss(out[..., 3], ts.depths[i].to(device), ts.confs[i].to(device))
+            if depth_vms[i] is not None:
+                dvm = depth_vms[i]
+                if pose is not None:
+                    # The per-camera correction is a trajectory error; apply it to the depth view too.
+                    dvm = pose(dvm, idx)
+                dh, dw = ts.depths[i].shape[-2:]
+                pred = _rasterize(params, dvm, depth_Ks[i], dw, dh, 0, "ED")[0][..., 0]
+            else:
+                pred = out[..., 3]
+            dl = depth_loss(pred, ts.depths[i].to(device), ts.confs[i].to(device))
             if dl is not None:
                 loss = loss + profile.depth_lambda * dl
                 depth_used[i] = True
@@ -345,6 +394,10 @@ def train(
             on_progress((step + 1) / iters)
 
     if use_depth:
-        log.info("深度约束用于 %d/%d 个有深度的帧", sum(depth_used), sum(has_depth))
+        log.info(
+            "深度约束用于 %d/%d 个有深度的帧（其中 %d 帧按深度自身位姿单独渲染）",
+            sum(depth_used), sum(has_depth), n_depth_view,
+        )
+    log.info("训练耗时 %.1f s（%d 步）", time.monotonic() - t_start, iters)
     _log_pose_stats(pose)
     return Splats(**{k: v.detach() for k, v in params.items()})

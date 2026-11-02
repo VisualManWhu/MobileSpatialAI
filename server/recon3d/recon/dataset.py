@@ -31,6 +31,9 @@ class TrainingSet:
     depth_K: optional per-frame [3,3] intrinsics in depth-image pixels (or None per frame).
         When absent/None, back-projection uses the image K scaled by dw/W and dh/H.
     confs: per-frame [dh,dw] float32 confidence in 0..1 matching depths (None where depth is None).
+    depth_c2w: per-frame [4,4] camera-to-world (OpenCV) of the frame the depth map was
+        captured from, or None = same as c2w[i]. Raw ARCore depth lags the camera frame, so
+        the app pairs it with the pose of its own frame (capture-format v2 `depth_pose`).
     """
 
     images: torch.Tensor
@@ -39,6 +42,7 @@ class TrainingSet:
     depths: list[torch.Tensor | None]
     depth_K: list[torch.Tensor | None] | None = field(default=None)
     confs: list[torch.Tensor | None] = field(default_factory=list)
+    depth_c2w: list[torch.Tensor | None] = field(default_factory=list)
 
 
 def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> TrainingSet:
@@ -48,7 +52,7 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
     h = max(1, round(m.image_height * scale))
     sx, sy = w / m.image_width, h / m.image_height
 
-    images, Ks, poses, depths, depth_Ks, confs = [], [], [], [], [], []
+    images, Ks, poses, depths, depth_Ks, confs, depth_c2ws = [], [], [], [], [], [], []
     for fr in cap.frames:
         with Image.open(cap.root / fr.image) as im:
             im = im.convert("RGB")
@@ -61,6 +65,7 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
             depths.append(None)
             depth_Ks.append(None)
             confs.append(None)
+            depth_c2ws.append(None)
             continue
         with Image.open(cap.root / fr.depth) as d:
             arr = np.asarray(d, dtype=np.float32) / 1000.0  # 16-bit mm -> m
@@ -78,6 +83,7 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
                 depths.append(None)
                 depth_Ks.append(None)
                 confs.append(None)
+                depth_c2ws.append(None)
                 continue
         dk = (fr.depth_fx, fr.depth_fy, fr.depth_cx, fr.depth_cy)
         if all(v is not None for v in dk):
@@ -95,10 +101,15 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
                 depths.append(None)
                 depth_Ks.append(None)
                 confs.append(None)
+                depth_c2ws.append(None)
                 continue
             depth_Ks.append(None)
         depths.append(torch.from_numpy(arr).to(device))
         confs.append(torch.from_numpy(depth_confidence(arr, conf_u8)).to(device))
+        depth_c2ws.append(
+            None if fr.depth_pose is None
+            else torch.tensor(gl_to_cv_c2w(fr.depth_pose), dtype=torch.float32, device=device)
+        )
 
     return TrainingSet(
         images=torch.from_numpy(np.stack(images)).to(device),
@@ -107,4 +118,5 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
         depths=depths,
         depth_K=depth_Ks,
         confs=confs,
+        depth_c2w=depth_c2ws,
     )

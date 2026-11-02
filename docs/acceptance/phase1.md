@@ -93,7 +93,9 @@
   期望：不报错，输出一行"帧数 N 图像 W x H"。仓库自带的样例包（`server/tests/fixtures/android_v1.zip`）实测输出为 `帧数 3 图像 64 x 48`，说明命令本身可用。
   真机拍摄包的期望：帧数与 App 显示的"已拍 N 张"一致，图像长边（W、H 中较大者）>= 1280；对着远处墙时深度 PNG 里出现 > 8191 mm 的值。
 - [ ] logcat 中 `CaptureScreen: AR ready: image WxH, depth=…` 记下实际分辨率；`CapturePipeline` 的丢弃/失败计数也记下
-- [ ] 拍摄结束后 logcat 中 `CaptureRenderer: raw depth: fresh N / stale M`（v2 拍摄包的原始深度计数）：期望 fresh ≥ 关键帧数的 50 %，低于则记在第 5 节。拍摄包 zip 里 `conf/` 文件数应约等于帧数的大半（fresh 帧才有置信度图）
+- [ ] 拍摄结束后 logcat 中 `CaptureRenderer: raw depth: fresh N / stale M / duplicate D; lag ms …`（v2 拍摄包的原始深度计数；fresh = raw depth 按其自身时间戳在 2 s 位姿缓冲里配到了位姿并写入，duplicate = 同一张 raw 图已在上一关键帧写过、本帧回退平滑深度，stale = 超过 2 s 或不可用）：
+  期望 fresh 占多数（fresh > stale + duplicate；2026-11-02 改配对方式前实测为 `fresh 0 / stale 340`，因为 raw depth 永远落后当前帧），低于则记在第 5 节。
+  拍摄包 zip 里 `conf/` 文件数应等于 fresh 数；用上面的 Ubuntu 命令加 `print(sum(f.depth_pose is not None for f in c.frames))` 可数出带 `depth_pose` 的帧数，应与 fresh 一致
 - [ ] logcat 中 `CaptureRenderer: intrinsics: …`（每次拍摄一行）记下：CPU 图像尺寸、CPU 内参（imageIntrinsics 的尺寸与 f、c）、纹理内参（textureIntrinsics 的尺寸与 f、c）、深度图尺寸与写入的 depth k。
   若纹理与 CPU 图像宽高比不同，说明深度内参确实需要单独记录（拍摄包里每帧的 `depth_fx/fy/cx/cy`）
 - [ ] 故意拍一次没有深度的：在很暗的房间里拍，或用手指挡住机背的深度/ToF 传感器（若有）。等 10 秒后若仍无深度，录制时应出现黄色提示"未获取到深度，本次拍摄将不含深度（重建质量可能下降）"，logcat 有 `depth never became available` 警告。

@@ -115,6 +115,25 @@ def test_bad_depth_kind_is_error(tmp_path):
         load_capture(z, tmp_path / "w")
 
 
+DP = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.3, 0.0, 0.05, 1]  # column-major, translation (0.3, 0, 0.05)
+
+
+def test_v2_depth_pose_loads_as_matrix(tmp_path):
+    z = make_capture(tmp_path, n_frames=2, format_version=2, depth_poses=[DP, None])
+    cap = load_capture(z, tmp_path / "w")
+    dp = cap.frames[0].depth_pose
+    assert dp is not None and dp.shape == (4, 4)
+    assert dp[0, 3] == pytest.approx(0.3) and dp[2, 3] == pytest.approx(0.05)
+    assert list(dp[3, :]) == [0, 0, 0, 1]
+    assert cap.frames[1].depth_pose is None
+
+
+def test_depth_pose_wrong_size_is_error(tmp_path):
+    z = make_capture(tmp_path, n_frames=1, format_version=2, depth_poses=[DP[:12]])
+    with pytest.raises(CaptureFormatError, match="frames.jsonl 格式错误"):
+        load_capture(z, tmp_path / "w")
+
+
 def test_v3_rejected(tmp_path):
     with pytest.raises(CaptureFormatError, match="不支持的拍摄包版本: 3"):
         load_capture(make_capture(tmp_path, format_version=3), tmp_path / "w")

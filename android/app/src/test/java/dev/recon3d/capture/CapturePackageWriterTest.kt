@@ -108,6 +108,25 @@ class CapturePackageWriterTest {
         assertEquals(200, img.raster.getSample(3, 2, 0))
     }
 
+    @Test fun depthPoseWrittenOnlyWithDepth() {
+        val w = writer()
+        val dp = translate(0.05f)
+        w.addFrame(1, jpeg(1), depth(4, 3), identity(), 500f, 500f, 320f, 240f, depthKind = "raw", confidence = ByteArray(12), depthPose = dp)
+        w.addFrame(2, jpeg(2), null, identity(), 500f, 500f, 320f, 240f, depthPose = dp)
+        w.addFrame(3, jpeg(3), depth(4, 3), identity(), 500f, 500f, 320f, 240f)
+        val lines = text(w.finish(), "frames.jsonl").lines().filter { it.isNotBlank() }
+        val f1 = Json.parseToJsonElement(lines[0]).jsonObject
+        val arr = f1["depth_pose"]!!.jsonArray
+        assertEquals(16, arr.size)
+        assertEquals(0.05f, arr[12].jsonPrimitive.content.toFloat(), 0f)
+        assertEquals(0f, f1["pose"]!!.jsonArray[12].jsonPrimitive.content.toFloat(), 0f)
+        for (i in 1..2) assertFalse("depth_pose" in Json.parseToJsonElement(lines[i]).jsonObject)
+    }
+
+    @Test(expected = IllegalArgumentException::class) fun depthPoseMustHave16Floats() {
+        writer().addFrame(1, jpeg(), depth(4, 3), identity(), 1f, 1f, 1f, 1f, depthPose = FloatArray(12))
+    }
+
     @Test(expected = IllegalArgumentException::class) fun confidenceSizeMustMatchDepth() {
         writer().addFrame(1, jpeg(), depth(4, 3), identity(), 1f, 1f, 1f, 1f, depthKind = "raw", confidence = ByteArray(5))
     }
@@ -123,7 +142,8 @@ class CapturePackageWriterTest {
 
     /**
      * Cross-language contract: produces server/tests/fixtures/android_v2.zip (consumed by test_pipeline.py):
-     * real JPEGs, frame 1 raw depth + confidence, frame 2 smooth. android_v1.zip is a frozen legacy fixture
+     * real JPEGs, frame 1 raw depth + confidence + depth_pose (differs from pose), frame 2 smooth.
+     * android_v1.zip is a frozen legacy fixture
      * (this writer only emits v2 now).
      */
     @Test fun writesV2SampleForServerContract() {
@@ -141,6 +161,8 @@ class CapturePackageWriterTest {
                 depthIntrinsics = floatArrayOf(6.5f, 6.5f, 4f, 3f),
                 depthKind = if (i == 0) "raw" else "smooth",
                 confidence = if (i == 0) ByteArray(48) { 200.toByte() } else null,
+                // Raw depth paired with the pose of its own (earlier) frame: 2 deg yaw, 5 cm back from "pose".
+                depthPose = if (i == 0) pose(2f, 0f, 0f, 0f, 0.05f) else null,
             )
         }
         val zip = w.finish()

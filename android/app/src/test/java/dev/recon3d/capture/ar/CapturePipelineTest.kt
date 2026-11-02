@@ -87,9 +87,60 @@ class CapturePipelineTest {
         assertEquals(null, p.finish())
     }
 
-    @Test fun rawDepthFreshnessIsTimestampEquality() {
-        assertTrue(rawDepthIsFresh(5, 5))
-        assertFalse(rawDepthIsFresh(4, 5))
+    private fun p16(x: Float) = floatArrayOf(1f, 0f, 0f, 0f, 0f, 1f, 0f, 0f, 0f, 0f, 1f, 0f, x, 0f, 0f, 1f)
+
+    @Test fun poseHistoryLooksUpExactTimestampAndCopies() {
+        val h = PoseHistory()
+        val p = p16(0.5f)
+        h.record(100, p)
+        p[12] = 9f // caller's buffer is reused by the renderer; the history must have copied it
+        h.record(200, p16(0.7f))
+        assertEquals(0.5f, h.lookup(100)!![12], 0f)
+        assertEquals(0.7f, h.lookup(200)!![12], 0f)
+        assertEquals(null, h.lookup(150))
+        assertEquals(2, h.size)
+    }
+
+    @Test fun poseHistoryEvictsEntriesOlderThanWindow() {
+        val h = PoseHistory(windowNs = 2_000_000_000L)
+        val step = 33_000_000L // 30 fps
+        for (i in 0 until 100) h.record(i * step, p16(i.toFloat()))
+        // newest t = 99*33 ms = 3267 ms; entries older than 1267 ms are gone
+        assertEquals(null, h.lookup(0))
+        assertEquals(null, h.lookup(38 * step)) // 1254 ms -> 2013 ms behind: evicted
+        assertEquals(39f, h.lookup(39 * step)!![12], 0f) // 1980 ms behind: kept
+        assertEquals(99f, h.lookup(99 * step)!![12], 0f)
+        assertTrue("about 2 s / 33 ms = 61 entries, got ${h.size}", h.size in 60..62)
+    }
+
+    @Test fun rawDepthMatcherPairsOwnPoseOnceAndRejectsStale() {
+        val h = PoseHistory()
+        val m = RawDepthMatcher(h)
+        h.record(100, p16(1f)); h.record(133, p16(2f)); h.record(166, p16(3f))
+        assertEquals(null, m.match(50)) // never seen -> stale
+        // keyframe at t=166 gets a raw image computed for t=100: pair it with the pose of t=100
+        assertEquals(1f, m.match(100)!![12], 0f)
+        // next keyframe still sees the same raw image -> duplicate, fall back to smooth
+        assertTrue(m.isDuplicate(100))
+        assertEquals(null, m.match(100))
+        assertFalse(m.isDuplicate(133))
+        assertEquals(2f, m.match(133)!![12], 0f)
+        m.reset()
+        assertFalse(m.isDuplicate(133))
+        assertEquals(2f, m.match(133)!![12], 0f)
+    }
+
+    @Test fun depthPoseIsWrittenOnlyForRawDepth() = runBlocking {
+        val p = pipeline(intArrayOf(2, 1)) { byteArrayOf(1) }
+        val conf = byteArrayOf(10, 250.toByte())
+        p.submit(job(1, DepthBytes(le(9000) + le(1200), 2, 1, 4, kind = "raw", confidence = conf, confRowStride = 2, pose = p16(0.25f))))
+        p.submit(job(2, DepthBytes(le(9000) + le(1200), 2, 1, 4)))
+        val zip = p.finish()!!
+        ZipFile(zip).use { z ->
+            val lines = z.getInputStream(z.getEntry("frames.jsonl")).bufferedReader().readLines()
+            assertTrue(lines[0].contains("\"depth_pose\":[1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.0,0.0,0.0,1.0,0.0,0.25,0.0,0.0,1.0]"))
+            assertFalse(lines[1].contains("depth_pose"))
+        }
     }
 
     @Test fun rawDepthConfidenceIsStrippedAndWritten() = runBlocking {

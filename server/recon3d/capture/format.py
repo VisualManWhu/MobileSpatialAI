@@ -54,6 +54,10 @@ class Frame(BaseModel):
     # kind of depth it describes; v1 packages get the defaults.
     confidence: str | None = None
     depth_kind: Literal["raw", "smooth"] = "smooth"
+    # v2: pose of the camera frame the depth image was computed for (raw depth lags the
+    # camera frame by 30-1800 ms on Pixel devices). Same convention as `pose`; None =
+    # the depth belongs to this frame's own pose.
+    depth_pose: np.ndarray | None = None
 
 
 class Capture(BaseModel):
@@ -118,6 +122,11 @@ def load_capture(zip_path: Path, workdir: Path) -> Capture:
             if pose.size != 16:
                 raise ValueError("pose")
             d["pose"] = pose.reshape(4, 4).T  # column-major -> row-major matrix
+            if d.get("depth_pose") is not None:
+                dp = np.array(d["depth_pose"], dtype=np.float64)
+                if dp.size != 16:
+                    raise ValueError("depth_pose")
+                d["depth_pose"] = dp.reshape(4, 4).T
             frames.append(Frame(**d))
         except (json.JSONDecodeError, KeyError, ValueError, ValidationError) as e:
             raise CaptureFormatError("frames.jsonl 格式错误") from e

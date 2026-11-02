@@ -2,6 +2,7 @@ import dataclasses
 
 import numpy as np
 import pytest
+import torch
 
 from recon3d.capture.format import load_capture
 from recon3d.config import PROFILES
@@ -77,6 +78,27 @@ def test_training_set_confs_heuristic_for_v1(tmp_path):
     z = make_capture(tmp_path, n_frames=1, depths=[np.full((6, 8), 1500, np.uint16)])
     ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
     assert float(ts.confs[0].min()) == 1.0  # flat depth, no edges
+
+
+def test_depth_c2w_from_depth_pose_in_cv_convention(tmp_path):
+    dp = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.3, 0.0, 0.05, 1]
+    z = make_capture(tmp_path, n_frames=3, format_version=2, depth_poses=[dp, None, dp], with_depth=True)
+    ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
+    assert len(ts.depth_c2w) == 3
+    assert ts.depth_c2w[1] is None
+    d = ts.depth_c2w[0]
+    assert d.shape == (4, 4)
+    assert float(d[0, 3]) == pytest.approx(0.3) and float(d[2, 3]) == pytest.approx(0.05)
+    # OpenGL -> OpenCV flips the y and z axes of the rotation block
+    assert float(d[1, 1]) == pytest.approx(-1.0) and float(d[2, 2]) == pytest.approx(-1.0)
+    assert not torch.allclose(d, ts.c2w[0])
+
+
+def test_depth_c2w_none_without_depth(tmp_path):
+    dp = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.3, 0.0, 0.05, 1]
+    z = make_capture(tmp_path, n_frames=1, format_version=2, with_depth=False, depth_poses=[dp])
+    ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
+    assert ts.depth_c2w == [None]
 
 
 def test_conf_size_mismatch_skips_depth(tmp_path, caplog):

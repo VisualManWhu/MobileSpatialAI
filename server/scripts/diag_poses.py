@@ -45,7 +45,9 @@ def load(root: Path):
         K = np.array([[fr["fx"] * sx, 0, fr["cx"] * sx], [0, fr["fy"] * sy, fr["cy"] * sy], [0, 0, 1]])
         Kimg = np.array([[fr["fx"], 0, fr["cx"]], [0, fr["fy"], fr["cy"]], [0, 0, 1]])
         out.append({"idx": fr["index"], "t": fr["t_ns"] * 1e-9, "depth": d, "K": K, "Kimg": Kimg,
-                    "image": root / fr["image"], "c2w": gl_to_cv_c2w(np.array(fr["pose"]).reshape(4, 4).T)})
+                    "image": root / fr["image"],
+                    # v2 raw depth carries the pose of its own (earlier) frame; the depth checks need that one.
+                    "c2w": gl_to_cv_c2w(np.array(fr.get("depth_pose") or fr["pose"]).reshape(4, 4).T)})
     return out
 
 

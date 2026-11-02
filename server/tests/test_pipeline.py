@@ -2,6 +2,7 @@ import shutil
 from dataclasses import replace
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from recon3d.capture.format import CaptureFormatError, load_capture
@@ -94,3 +95,9 @@ def test_android_v2_fixture_trains_with_raw_confidence(tmp_path):
     assert ts.confs[0].numpy() == pytest.approx(200 / 255)  # constant map from the PNG
     assert ts.confs[1] is not None  # heuristic confidence for smooth depth
     assert not (ts.confs[1].numpy() == pytest.approx(200 / 255))
+    # raw depth carries the pose of its own frame (2 deg yaw, 5 cm back), smooth depth does not
+    assert cap.frames[0].depth_pose is not None and cap.frames[1].depth_pose is None
+    assert not np.allclose(cap.frames[0].depth_pose, cap.frames[0].pose)
+    assert cap.frames[0].depth_pose[2, 3] == pytest.approx(0.05)
+    assert ts.depth_c2w[0] is not None and ts.depth_c2w[1] is None
+    assert float(ts.depth_c2w[0][2, 3]) == pytest.approx(0.05)

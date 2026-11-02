@@ -84,6 +84,39 @@ def test_init_points_drops_low_confidence(tmp_path):
     assert (xyz[:, 0] >= -1e-6).all()
 
 
+def test_init_points_uses_depth_c2w_when_present():
+    ts = _ts([torch.full((20, 30), 2.0), None])
+    base, _ = init_points(ts, voxel_size=0.01, min_points=0)
+    # Depth captured 0.3 m to the right of (and 0.1 m behind) camera 0: points shift with it.
+    dc2w = torch.eye(4)
+    dc2w[0, 3] = 0.3
+    dc2w[2, 3] = -0.1
+    ts.depth_c2w = [dc2w, None]
+    xyz, rgb = init_points(ts, voxel_size=0.01, min_points=0)
+    assert len(xyz) == len(base)
+    assert np.allclose(np.sort(xyz[:, 0]) - np.sort(base[:, 0]), 0.3, atol=0.02)
+    assert np.allclose(xyz[:, 2], 1.9, atol=0.03)
+    assert rgb.min() >= 0 and rgb.max() <= 1
+
+
+def test_init_points_colour_sampled_by_projection_with_depth_c2w():
+    # Image 0 is black on the left half and white on the right; the depth plane is 2 m away.
+    ts = _ts([torch.full((20, 30), 2.0), None])
+    img = torch.zeros(40, 60, 3)
+    img[:, 30:] = 1.0
+    ts.images[0] = img
+    xyz0, rgb0 = init_points(ts, voxel_size=0.01, min_points=0)
+    assert abs(float((rgb0[:, 0] > 0.5).mean()) - 0.5) < 0.1
+    # Depth from a pose 1 m to the right: back-projected points move right, so when projected
+    # into image 0 almost all of them land on the white half.
+    dc2w = torch.eye(4)
+    dc2w[0, 3] = 1.0
+    ts.depth_c2w = [dc2w, None]
+    xyz, rgb = init_points(ts, voxel_size=0.01, min_points=0)
+    assert np.allclose(xyz[:, 0].min(), xyz0[:, 0].min() + 1.0, atol=0.02)
+    assert float((rgb[:, 0] > 0.5).mean()) > 0.75
+
+
 def test_init_points_v1_drops_far_and_edges(tmp_path):
     depth = np.full((6, 8), 1500, np.uint16); depth[:, 6:] = 5000  # 5 m: beyond 4 m, plus an edge at col 5|6
     z = make_capture(tmp_path, n_frames=1, depths=[depth])

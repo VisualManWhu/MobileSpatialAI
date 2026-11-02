@@ -38,6 +38,7 @@ def make_capture(
     confidences: list[np.ndarray] | None = None,
     depth_kind: str | None = None,
     drop_confidence: int | None = None,
+    depth_poses: list[list[float] | None] | None = None,
     name: str = "capture.zip",
 ) -> Path:
     """Write a capture zip into tmp_path and return its path.
@@ -54,6 +55,8 @@ def make_capture(
     confidences: v2 only; optional list of uint8 HxW arrays written as conf/%06d.png.
     depth_kind: v2 only; written per frame, defaults to "raw" with confidences else "smooth".
     drop_confidence: 1-based frame index whose confidence file is omitted (field still written).
+    depth_poses: v2 only; optional per-frame 16-float column-major pose of the depth's own frame
+        (None entries are skipped), written as "depth_pose".
     """
     if images is not None:
         image_height, image_width = images[0].shape[:2]
@@ -95,6 +98,8 @@ def make_capture(
                 rec["confidence"] = f"conf/{i:06d}.png" if confidences is not None else None
             if with_depth and depth_intrinsics is not None:
                 rec.update(zip(("depth_fx", "depth_fy", "depth_cx", "depth_cy"), depth_intrinsics))
+            if depth_poses is not None and depth_poses[i - 1] is not None:
+                rec["depth_pose"] = depth_poses[i - 1]
             lines.append(json.dumps(rec))
             if drop_image != i:
                 buf = io.BytesIO()

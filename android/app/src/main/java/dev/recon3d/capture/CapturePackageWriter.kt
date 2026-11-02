@@ -42,8 +42,10 @@ class CapturePackageWriter(
         depthIntrinsics: FloatArray? = null,
         depthKind: String = "smooth",
         confidence: ByteArray? = null,
+        depthPose: FloatArray? = null,
     ) {
         require(poseGl.size == 16) { "pose must have 16 floats" }
+        require(depthPose == null || depthPose.size == 16) { "depthPose must have 16 floats" }
         require(depthIntrinsics == null || depthIntrinsics.size == 4) { "depthIntrinsics must be [fx, fy, cx, cy]" }
         require(depthKind == "raw" || depthKind == "smooth") { "depthKind must be raw or smooth" }
         require(confidence == null || depthMm != null) { "confidence given without depth" }
@@ -78,6 +80,9 @@ class CapturePackageWriter(
             // Format v2: depth source, written only when this frame has depth; confidence map path or null.
             if (depthRel != null) put("depth_kind", depthKind)
             put("confidence", confRel?.let { JsonPrimitive(it) } ?: JsonNull)
+            // Format v2: pose of the frame the depth was computed for (same convention as "pose"),
+            // written only when this frame has depth and the caller supplied one (raw depth).
+            if (depthRel != null && depthPose != null) put("depth_pose", JsonArray(depthPose.map { JsonPrimitive(it) }))
         }
         framesFile.appendText(line.toString() + "\n")
     }

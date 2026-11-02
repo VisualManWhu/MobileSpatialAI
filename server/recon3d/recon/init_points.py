@@ -64,9 +64,21 @@ def init_points(
         x = (u - cx) / fx * z
         y = (v - cy) / fy * z
         pts_c = np.stack([x, y, z, np.ones_like(z)], axis=1)
-        pts_w = (c2ws[i] @ pts_c.T).T[:, :3]
-        iu = np.clip(np.round(u * W / dw).astype(int), 0, W - 1)
-        iv = np.clip(np.round(v * H / dh).astype(int), 0, H - 1)
+        dc2w = ts.depth_c2w[i] if i < len(ts.depth_c2w) else None
+        if dc2w is None:
+            pts_w = (c2ws[i] @ pts_c.T).T[:, :3]
+            iu = np.clip(np.round(u * W / dw).astype(int), 0, W - 1)
+            iv = np.clip(np.round(v * H / dh).astype(int), 0, H - 1)
+        else:
+            # The depth was captured from its own pose (raw depth lags the camera frame):
+            # back-project with that pose, then project into image i for the colour.
+            pts_w = (dc2w.detach().cpu().numpy().astype(np.float64) @ pts_c.T).T[:, :3]
+            w2c = np.linalg.inv(c2ws[i])
+            pc = (w2c[:3, :3] @ pts_w.T).T + w2c[:3, 3]
+            zc = np.where(pc[:, 2] > 1e-6, pc[:, 2], np.nan)
+            K = Ks[i]
+            iu = np.clip(np.nan_to_num(np.round(K[0, 0] * pc[:, 0] / zc + K[0, 2]), nan=0).astype(int), 0, W - 1)
+            iv = np.clip(np.nan_to_num(np.round(K[1, 1] * pc[:, 1] / zc + K[1, 2]), nan=0).astype(int), 0, H - 1)
         xyz_all.append(pts_w)
         rgb_all.append(images[i][iv, iu].astype(np.float64))
 

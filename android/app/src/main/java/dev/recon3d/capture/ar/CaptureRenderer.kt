@@ -64,8 +64,17 @@ class CaptureRenderer(
     /** Pipeline for which the intrinsics were already logged (log once per capture). */
     private var intrinsicsLoggedFor: CapturePipeline? = null
 
-    /** Raw-depth acquisitions for the current pipeline: fresh (used) vs stale/unavailable (smooth fallback). */
+    /** Pose of every rendered frame for the last 2 s, so a lagging raw depth image can get its own frame's pose. */
+    private val poseHistory = PoseHistory()
+    private val rawMatcher = RawDepthMatcher(poseHistory)
+
+    /**
+     * Raw-depth acquisitions for the current pipeline: fresh (raw image paired with its own frame's pose and
+     * used), duplicate (same raw image already written by an earlier keyframe; smooth fallback) and
+     * stale/unavailable (no pose for its timestamp within 2 s, or not yet available; smooth fallback).
+     */
     private var rawFresh = 0
+    private var rawDup = 0
     private var rawStale = 0
     private val rawLagMs = ArrayList<Long>()
     private var rawUpdates = 0
@@ -113,6 +122,7 @@ class CaptureRenderer(
         val camera = frame.camera
         val tracking = camera.trackingState == TrackingState.TRACKING
         camera.pose.toMatrix(pose, 0) // world_from_camera, column-major, OpenGL convention
+        if (tracking) poseHistory.record(t, pose)
         _ui.value = guide.onFrame(t, pose, tracking)
 
         try {
@@ -180,14 +190,14 @@ class CaptureRenderer(
     }
 
     /**
-     * Prefers ARCore raw depth + confidence when it was computed for this very frame ([rawDepthIsFresh]);
+     * Prefers ARCore raw depth + confidence when the pose of the frame it was computed for is still in
+     * [poseHistory] (the raw image lags the camera; it is paired with its own pose, see [RawDepthMatcher]);
      * otherwise falls back to the smoothed depth (`kind = "smooth"`, no confidence).
      * ARCore depth is aligned with the GPU texture (ruling R28), so its intrinsics are
      * `camera.textureIntrinsics` scaled from textureIntrinsics.imageDimensions to the depth size.
      */
     private fun acquireDepth(frame: Frame, camera: Camera): DepthBytes? {
         acquireRawDepth(frame, camera)?.let { rawFresh++; return it }
-        rawStale++
         return try {
             frame.acquireDepthImage16Bits().use { d ->
                 val p = d.planes[0]
@@ -198,25 +208,29 @@ class CaptureRenderer(
         }
     }
 
-    /** Raw depth + Y8 confidence for this frame, or null if not yet available or computed for an earlier frame. */
+    /**
+     * Raw depth + Y8 confidence + the pose of its own frame, or null if not yet available, already written
+     * for an earlier keyframe (duplicate) or older than the pose window (stale). Counts the fallbacks.
+     */
     private fun acquireRawDepth(frame: Frame, camera: Camera): DepthBytes? = try {
         frame.acquireRawDepthImage16Bits().use { d ->
-            if (!rawDepthIsFresh(d.timestamp, frame.timestamp)) {
-                // Diagnostic: how far behind the camera frame the raw depth is, and how often it updates.
-                rawLagMs.add((frame.timestamp - d.timestamp) / 1_000_000)
-                if (d.timestamp != lastRawTs) { rawUpdates++; lastRawTs = d.timestamp }
-                return null
-            }
+            // Diagnostic: how far behind the camera frame the raw depth is, and how often it updates.
+            rawLagMs.add((frame.timestamp - d.timestamp) / 1_000_000)
+            if (d.timestamp != lastRawTs) { rawUpdates++; lastRawTs = d.timestamp }
+            if (rawMatcher.isDuplicate(d.timestamp)) { rawDup++; return null }
+            val depthPose = rawMatcher.match(d.timestamp) ?: run { rawStale++; return null }
             frame.acquireRawDepthConfidenceImage().use { c ->
                 val p = d.planes[0]
                 val cp = c.planes[0]
                 DepthBytes(
                     p.copyBytes(), d.width, d.height, p.rowStride, depthIntrinsics(camera, d),
                     kind = "raw", confidence = cp.copyBytes(), confRowStride = cp.rowStride,
+                    pose = depthPose,
                 )
             }
         }
     } catch (_: NotYetAvailableException) {
+        rawStale++
         null
     }
 
@@ -227,12 +241,13 @@ class CaptureRenderer(
 
     /** Logs and resets the raw-depth counters (no-op when nothing was counted). */
     private fun logRawDepthStats() {
-        if (rawFresh + rawStale == 0) return
+        rawMatcher.reset()
+        if (rawFresh + rawDup + rawStale == 0) return
         val lag = rawLagMs.sorted()
         val lagText = if (lag.isEmpty()) "" else
             "; lag ms min ${lag.first()} / median ${lag[lag.size / 2]} / max ${lag.last()}; distinct raw images ${rawUpdates}"
-        Log.i(TAG, "raw depth: fresh $rawFresh / stale $rawStale$lagText")
-        rawFresh = 0; rawStale = 0; rawLagMs.clear(); rawUpdates = 0; lastRawTs = 0L
+        Log.i(TAG, "raw depth: fresh $rawFresh / stale $rawStale / duplicate $rawDup$lagText")
+        rawFresh = 0; rawDup = 0; rawStale = 0; rawLagMs.clear(); rawUpdates = 0; lastRawTs = 0L
     }
 
     private fun logIntrinsicsOnce(img: Image, imgDims: IntArray, f: FloatArray, c: FloatArray, camera: Camera, depth: DepthBytes?) {

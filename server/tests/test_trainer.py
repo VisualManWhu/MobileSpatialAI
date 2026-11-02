@@ -129,6 +129,39 @@ def test_depth_loss_not_usable_without_confs():
     assert not _depth_loss_usable(_depth_ts(confs=False), 0, 192, 256)
 
 
+def _with_depth_view(ts, shift=0.1):
+    d = torch.eye(4)
+    d[0, 3] = shift
+    ts.depth_c2w = [d]
+    return ts
+
+
+def test_depth_view_only_when_pose_differs():
+    from recon3d.recon.trainer import _depth_view
+    assert _depth_view(_depth_ts(), 0) is None  # no depth_c2w
+    ts = _depth_ts()
+    ts.depth_c2w = [torch.eye(4)]  # equal to c2w -> treated as absent
+    assert _depth_view(ts, 0) is None
+    assert _depth_view(_with_depth_view(_depth_ts()), 0) is not None
+
+
+def test_depth_loss_usable_with_depth_view_relaxes_size_and_K():
+    from recon3d.recon.trainer import _depth_loss_usable
+    # Non-divisible depth size and a mismatched depth_K are both fine with an own depth pose...
+    assert _depth_loss_usable(_with_depth_view(_depth_ts(dh=50, dw=64)), 0, 192, 256)
+    assert _depth_loss_usable(_with_depth_view(_depth_ts(depth_K=_scaled_K(fx_mul=1.05))), 0, 192, 256)
+    # ...but depth and confidence are still required.
+    assert not _depth_loss_usable(_with_depth_view(_depth_ts(confs=False)), 0, 192, 256)
+
+
+def test_depth_K_falls_back_to_scaled_image_K():
+    from recon3d.recon.trainer import _depth_K
+    k = _depth_K(_depth_ts(), 0, 192, 256)
+    assert torch.allclose(k, _scaled_K())
+    dk = _scaled_K(fx_mul=1.05)
+    assert torch.equal(_depth_K(_depth_ts(depth_K=dk), 0, 192, 256), dk)
+
+
 @pytest.mark.gpu
 def test_trains_with_depth_loss_and_pose_refine(synthetic_ts, caplog):
     # Depth at 1/4 image resolution so the loss exercises the avg-pool path.
@@ -149,6 +182,48 @@ def test_trains_with_depth_loss_and_pose_refine(synthetic_ts, caplog):
     assert not any("深度约束跳过" in r.getMessage() for r in caplog.records)
     legacy = dataclasses.replace(PROFILES["laptop"], iterations=300, depth_lambda=0.0, pose_lr=0.0)
     assert train(ts, legacy, on_progress=lambda p: None).means.shape[0] > 0
+
+
+@pytest.mark.gpu
+def test_trains_with_depth_from_own_pose(synthetic_ts, caplog):
+    """Raw-depth scenario: frame i carries the depth map of frame i+1 together with that frame's
+    pose (depth_c2w). Depth at 1/4 resolution, cropped to a non-divisible 47x63 with explicit
+    depth intrinsics, so only the depth-view render path can use it."""
+    import time
+
+    tr = synthetic_ts[0]
+    n = len(tr.c2w)
+    nxt = [(i + 1) % n for i in range(n)]
+    dK = tr.K[0].clone()
+    dK[:2] *= 0.25
+    ts = dataclasses.replace(
+        tr,
+        depths=[tr.depths[j][::4, ::4][:47, :63].contiguous() for j in nxt],
+        confs=[tr.confs[j][::4, ::4][:47, :63].contiguous() for j in nxt],
+        depth_K=[dK.clone() for _ in range(n)],
+        depth_c2w=[tr.c2w[j].clone() for j in nxt],
+    )
+    p = dataclasses.replace(PROFILES["laptop"], iterations=2000, depth_lambda=0.05, pose_lr=1e-4)
+    with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
+        t0 = time.monotonic()
+        splats = train(ts, p, on_progress=lambda p: None)
+        dt_view = time.monotonic() - t0
+    assert any(f"深度约束用于 {n}/{n} 个有深度的帧（其中 {n} 帧按深度自身位姿单独渲染）" in r.getMessage()
+               for r in caplog.records)
+    assert not any("深度约束跳过" in r.getMessage() for r in caplog.records)
+    assert any("训练耗时" in r.getMessage() for r in caplog.records)
+    assert psnr(render(splats, synthetic_ts[1]), synthetic_ts[1].images) > 25.0
+    # Cost check: the extra depth-only render must stay well under 2x the pooled path.
+    pooled = dataclasses.replace(
+        tr,
+        depths=[d[::4, ::4].contiguous() for d in tr.depths],
+        confs=[c[::4, ::4].contiguous() for c in tr.confs],
+    )
+    t0 = time.monotonic()
+    train(pooled, dataclasses.replace(p, pose_lr=0.0), on_progress=lambda p: None)
+    dt_pooled = time.monotonic() - t0
+    print(f"\ndepth-view path {dt_view:.1f} s vs pooled path {dt_pooled:.1f} s for 2000 steps")
+    assert dt_view < 2.0 * dt_pooled + 5.0
 
 
 @pytest.mark.gpu
