@@ -12,7 +12,9 @@ class Profile:
     max_gaussians: int
     sh_degree: int
     depth_lambda: float = 0.05  # 0 disables the depth loss
-    pose_lr: float = 1e-4  # 0 disables per-camera pose refinement
+    # Pose refinement is opt-in (0 = off): on the office capture it lost 2.2 dB PSNR, removed fewer floaters
+    # and cost +50% time (docs/acceptance/phase1.md section 5).
+    pose_lr: float = 0.0
 
 
 PROFILES: dict[str, Profile] = {

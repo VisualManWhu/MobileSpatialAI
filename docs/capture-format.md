@@ -11,7 +11,7 @@
  "frame_count":120}
 ```
 
-- `format_version`: int，必须为 1 或 2（v2 见文末），否则报“不支持的拍摄包版本”。
+- `format_version`: int，当前 App 写 2，服务端接受 1 和 2（v2 见文末；上面的示例是 v1 的写法），否则报“不支持的拍摄包版本”。
 - `capture_id`, `room_id`, `device`: str；`kind` 固定为 `"model"`。
 - `created_at`: ISO8601。
 - `image_width/height`: JPEG 分辨率。

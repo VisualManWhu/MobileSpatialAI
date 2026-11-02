@@ -56,6 +56,6 @@ cd android/viewer-web && npm test
 
 - [docs/acceptance/phase1.md](docs/acceptance/phase1.md): 第一期验收（标准、测量方法、自动化结果、手机测试清单）
 - [docs/viewer.md](docs/viewer.md): 手机端 3D 查看器（含重新打包步骤）
-- [docs/capture-format.md](docs/capture-format.md): 拍摄包格式
+- [docs/capture-format.md](docs/capture-format.md): 拍摄包格式（App 现在写 v2 拍摄包，服务端同时接受 v1 和 v2）
 - [docs/api.md](docs/api.md): 服务端 API
 - 设计文档: [docs/superpowers/specs/2026-11-01-recon3d-design.md](docs/superpowers/specs/2026-11-01-recon3d-design.md)
