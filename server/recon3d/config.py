@@ -24,27 +24,35 @@ class Profile:
     # densification step and once more at the end of training.
     far_m: float = 5.0
     bbox_margin_m: float = 5.0
-    # Floater pruning (recon/contrib.py, recon/outliers.py). Contribution pruning renders every training
-    # view at half resolution and removes Gaussians visible (> contrib_view_px blended pixels at half resolution) in fewer
-    # than contrib_min_views views, or whose total contribution is below contrib_min_px; it runs at iterations // 2,
-    # 3 * iterations // 4 and once after training (both thresholds 0 disables it). The kNN statistical
-    # outlier filter (k = 8) then removes isolated Gaussian centres beyond mean + sor_sigma * std (0 disables).
-    contrib_min_views: int = 3
-    contrib_min_px: float = 0.5
+    # Floater pruning (recon/contrib.py, recon/outliers.py), opt-in (0 = off). Contribution pruning renders
+    # every training view at half resolution and removes Gaussians visible (> contrib_view_px blended pixels
+    # at half resolution) in fewer than contrib_min_views views, or whose total contribution is below
+    # contrib_min_px; it runs at iterations // 2, 3 * iterations // 4 and once after training (both
+    # thresholds 0 disables it). The kNN statistical outlier filter (k = 8) then removes isolated Gaussian
+    # centres beyond mean + sor_sigma * std (0 disables). Evidence: on two real captures contribution
+    # pruning cost 1.3 to 4 dB PSNR at every threshold tried (docs/acceptance/phase1.md section 5);
+    # the old opt-in values were contrib_min_views=3, contrib_min_px=0.5.
+    contrib_min_views: int = 0
+    contrib_min_px: float = 0.0
     # A Gaussian counts as visible in a view when its blended weight there exceeds this many
     # half-resolution pixels (the per-view threshold behind contrib_min_views).
     contrib_view_px: float = 1.0
-    sor_sigma: float = 3.0
+    # SOR is off: its effect was never isolated in the A/B (docs/acceptance/phase1.md section 5);
+    # the old opt-in value was 3.0.
+    sor_sigma: float = 0.0
     # Regularisers added to the loss every step (trainer.reg_loss): opacity_reg * mean(opacity) pushes
     # unneeded Gaussians towards transparency so they get pruned; scale_reg * mean(scale) discourages
-    # huge blobs. 0 disables each.
+    # huge blobs. 0 disables each. Measured together with MCMC (see strategy below).
     opacity_reg: float = 0.01
     scale_reg: float = 0.01
     # Densification strategy: "default" (gsplat DefaultStrategy: clone/split/prune plus our cap and opacity
     # reset) or "mcmc" (gsplat MCMCStrategy: relocates dead Gaussians and grows up to max_gaussians).
     # MCMC: contribution-pruning passes during relocation (step < refine_stop_iter) lower opacity so relocation
     # can reuse those Gaussians; passes at or after refine_stop_iter remove, as with "default".
-    strategy: str = "default"
+    # Evidence: MCMC + the regularisers above, on two real captures, outdoor 9f6d PSNR 18.71 -> 19.10 dB and
+    # floater score 0.375 -> 0.116, indoor 5cba 23.59 -> 24.30 dB and opaque floaters 57.6k -> 16.2k
+    # (docs/acceptance/phase1.md section 5).
+    strategy: str = "mcmc"
 
 
 PROFILES: dict[str, Profile] = {

@@ -13,6 +13,13 @@ from recon3d.recon.trainer import Splats, _enforce_cap, reg_loss, render, train 
 from tests.fixtures.synthetic import make_synthetic_scene  # noqa: E402
 
 
+# The pre-A/B defaults (DefaultStrategy, contribution pruning and SOR on). Tests of the default-strategy
+# mechanics (opacity reset, _enforce_cap, pruning at the cap) and of the pruning passes pin these explicitly
+# now that the profiles default to MCMC with pruning off.
+_DEFAULT_STRATEGY = dict(strategy="default")
+_PRUNING_ON = dict(contrib_min_views=3, contrib_min_px=0.5, sor_sigma=3.0)
+
+
 def psnr(pred: torch.Tensor, gt: torch.Tensor) -> float:
     mse = torch.mean((pred.to(gt.device).clamp(0, 1) - gt) ** 2)
     return float(-10.0 * torch.log10(mse))
@@ -73,7 +80,8 @@ def test_densification_growth_is_capped(synthetic_ts):
     n_init = len(init_points(ts)[0])
     cap = n_init + 200
     # Floater pruning shrinks the set below n_init; off here so only growth vs. the cap is measured.
-    p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=cap,
+    # DefaultStrategy: growth past the cap is trimmed by _enforce_cap (MCMC caps itself).
+    p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=cap, **_DEFAULT_STRATEGY,
                             contrib_min_views=0, contrib_min_px=0.0, sor_sigma=0.0)
     n = train(ts, p, on_progress=lambda p: None).means.shape[0]
     assert n_init < n <= cap
@@ -357,7 +365,7 @@ def test_opacity_reset_runs(synthetic_ts, monkeypatch):
 
     monkeypatch.setattr(ops, "reset_opa", spy)
     monkeypatch.setattr(trainer_mod, "RESET_EVERY", 100)
-    p = dataclasses.replace(PROFILES["laptop"], iterations=600, max_gaussians=20000)
+    p = dataclasses.replace(PROFILES["laptop"], iterations=600, max_gaussians=20000, **_DEFAULT_STRATEGY)
     train(synthetic_ts[0], p, on_progress=lambda p: None)
     # refine_stop = 300 -> resets at steps 100 and 200
     assert len(seen) == 2
@@ -381,7 +389,7 @@ def test_pruning_continues_at_cap(synthetic_ts, monkeypatch):
     # No depth -> 5000 random init points, subsampled to exactly the cap; many float in
     # empty space and must still be pruned although the count starts at the cap.
     ts = dataclasses.replace(synthetic_ts[0], depths=[None] * len(synthetic_ts[0].depths))
-    p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=3000)
+    p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=3000, **_DEFAULT_STRATEGY, **_PRUNING_ON)
     n = train(ts, p, on_progress=lambda p: None).means.shape[0]
     assert sum(pruned) > 0
     assert n <= 3000
@@ -404,7 +412,7 @@ _SOR_RE = re.compile(r"离群点滤波（k=8，[\d.]+σ）：移除 (\d+) 个高
 @pytest.mark.gpu
 def test_training_prunes_by_contribution_and_logs(synthetic_ts, caplog, tmp_path):
     ts = synthetic_ts[0]
-    p = dataclasses.replace(PROFILES["laptop"], iterations=400, max_gaussians=20000)
+    p = dataclasses.replace(PROFILES["laptop"], iterations=400, max_gaussians=20000, **_DEFAULT_STRATEGY, **_PRUNING_ON)
     with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
         splats = train(ts, p, on_progress=lambda p: None, pruned_out=tmp_path / "pruned.ply")
     msgs = [r.getMessage() for r in caplog.records]
@@ -429,7 +437,8 @@ def test_training_prunes_by_contribution_and_logs(synthetic_ts, caplog, tmp_path
 @pytest.mark.gpu
 def test_contribution_prune_never_empties(synthetic_ts):
     ts = synthetic_ts[0]
-    p = dataclasses.replace(PROFILES["laptop"], iterations=400, max_gaussians=20000, contrib_min_views=10_000)
+    p = dataclasses.replace(PROFILES["laptop"], iterations=400, max_gaussians=20000,
+                            **_DEFAULT_STRATEGY, **{**_PRUNING_ON, "contrib_min_views": 10_000})
     assert train(ts, p, on_progress=lambda p: None).means.shape[0] > 0
 
 
@@ -480,7 +489,7 @@ def test_mcmc_contrib_prune_lowers_opacity_instead_of_removing(synthetic_ts):
     )
     opts = {k: torch.optim.Adam([{"params": v, "name": k}]) for k, v in params.items()}
     state = MCMCStrategy().initialize_state()
-    p = dataclasses.replace(PROFILES["laptop"], strategy="mcmc")
+    p = dataclasses.replace(PROFILES["laptop"], strategy="mcmc", **_PRUNING_ON)
     viewmats = torch.linalg.inv(ts.c2w.cuda())
     H, W = ts.images.shape[1:3]
     n_marked, marked, split = _prune_contrib(params, opts, state, viewmats, ts.K.cuda(), W, H, p, relocatable=True)
@@ -497,6 +506,15 @@ def test_mcmc_contrib_prune_lowers_opacity_instead_of_removing(synthetic_ts):
     assert len(params["means"]) == n - n_removed
     assert removed is not None and removed.means.shape[0] == n_removed
     assert not (params["means"][:, 1] > 1e3).any()
+
+
+def test_profile_defaults_mcmc_without_pruning():
+    for name in ("laptop", "server"):
+        p = PROFILES[name]
+        assert p.strategy == "mcmc"
+        assert p.contrib_min_views == 0 and p.contrib_min_px == 0.0 and p.sor_sigma == 0.0
+        assert p.opacity_reg == 0.01 and p.scale_reg == 0.01
+        assert p.far_m == 5.0 and p.bbox_margin_m == 5.0 and p.contrib_view_px == 1.0
 
 
 def test_contrib_pass_skipped_soon_after_opacity_reset():
