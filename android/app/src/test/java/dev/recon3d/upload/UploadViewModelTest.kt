@@ -339,4 +339,13 @@ class UploadViewModelTest {
         assertEquals("完成", captureStatusText(r.copy(state = "done")))
         assertEquals("失败：显存不足", captureStatusText(r.copy(state = "failed", message = "显存不足")))
     }
+
+    @Test fun pointsButtonNeedsCloudAndHidesOnceDone() {
+        val r = CaptureRecord(id = "c", zipPath = "z", pointsPath = "p")
+        for (s in listOf("local", "uploading", "queued", "training", "exporting", "failed")) {
+            assertTrue(s, showsPointsButton(r.copy(state = s)))
+        }
+        assertFalse(showsPointsButton(r.copy(state = "done")))
+        assertFalse(showsPointsButton(r.copy(pointsPath = null, state = "training")))
+    }
 }

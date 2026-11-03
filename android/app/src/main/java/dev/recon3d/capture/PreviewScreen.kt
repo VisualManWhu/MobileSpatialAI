@@ -19,14 +19,23 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.recon3d.rooms.CaptureRecord
+import dev.recon3d.upload.captureStatusText
 import dev.recon3d.viewer.SceneViewer
 
 /**
- * Post-capture check: the ARCore feature points accumulated while recording, as a turnable cloud, so the
- * user can see whether the room's shape came out before spending minutes on an upload.
+ * The capture-time point cloud (keyframe depth back-projected while recording) as a turnable cloud.
+ *
+ * Right after recording ([onUpload] and [onRetake] given) it is the check before spending minutes on an upload.
+ * Opened from the room while the capture uploads or trains (both null) it is read-only: the bottom shows the
+ * live status line instead of the buttons.
  */
 @Composable
-fun PreviewScreen(record: CaptureRecord, onUpload: () -> Unit, onRetake: () -> Unit, modifier: Modifier = Modifier) {
+fun PreviewScreen(
+    record: CaptureRecord,
+    onUpload: (() -> Unit)?,
+    onRetake: (() -> Unit)?,
+    modifier: Modifier = Modifier,
+) {
     Column(modifier.fillMaxSize().background(Color(0xFF111111))) {
         Text(
             "拍摄预览 · ${record.pointCount} 个点 · ${record.frameCount} 张照片",
@@ -46,19 +55,27 @@ fun PreviewScreen(record: CaptureRecord, onUpload: () -> Unit, onRetake: () -> U
                 )
             }
         }
-        Text(
-            "看一眼房间的大致形状是否完整；有大块空白就重拍。",
-            color = Color.White.copy(alpha = 0.7f), textAlign = TextAlign.Center,
-            modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
-        )
-        Row(
-            Modifier.fillMaxWidth().padding(16.dp),
-            horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
-        ) {
-            OutlinedButton(onClick = onRetake, colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) {
-                Text("重拍")
+        if (onUpload != null && onRetake != null) {
+            Text(
+                "看一眼房间的大致形状是否完整；有大块空白就重拍。",
+                color = Color.White.copy(alpha = 0.7f), textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp),
+            )
+            Row(
+                Modifier.fillMaxWidth().padding(16.dp),
+                horizontalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterHorizontally),
+            ) {
+                OutlinedButton(onClick = onRetake, colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) {
+                    Text("重拍")
+                }
+                Button(onClick = onUpload) { Text("上传") }
             }
-            Button(onClick = onUpload) { Text("上传") }
+        } else {
+            Text(
+                captureStatusText(record),
+                color = Color.White, textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(16.dp),
+            )
         }
     }
 }

@@ -2,6 +2,8 @@ package dev.recon3d.nav
 
 import android.widget.Toast
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
@@ -29,10 +31,13 @@ object Routes {
     const val CAPTURE = "capture/{roomId}"
     const val VIEWER = "viewer/{roomId}/{captureId}"
     const val PREVIEW = "preview/{roomId}/{captureId}"
+    /** Read-only point cloud of a capture that is uploading / training (opened from the room). */
+    const val POINTS = "points/{roomId}/{captureId}"
     fun room(roomId: String) = "room/$roomId"
     fun capture(roomId: String) = "capture/$roomId"
     fun viewer(roomId: String, captureId: String) = "viewer/$roomId/$captureId"
     fun preview(roomId: String, captureId: String) = "preview/$roomId/$captureId"
+    fun points(roomId: String, captureId: String) = "points/$roomId/$captureId"
 }
 
 /** App navigation graph: rooms (start) → room → capture / viewer; gear → settings. */
@@ -71,6 +76,7 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
                 onUpload = { id -> withServer { graph.uploader.start(roomId, id) } },
                 onRetry = { id -> withServer { graph.uploader.retry(roomId, id) } },
                 onView = { id -> nav.navigate(Routes.viewer(roomId, id)) },
+                onViewPoints = { id -> nav.navigate(Routes.points(roomId, id)) },
                 onBack = { nav.popBackStack() },
             )
         }
@@ -113,6 +119,15 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
                     nav.navigate(Routes.capture(roomId)) { popUpTo(Routes.ROOM) }
                 },
             )
+        }
+        composable(Routes.POINTS) { entry ->
+            val roomId = entry.arguments?.getString("roomId") ?: return@composable
+            val captureId = entry.arguments?.getString("captureId") ?: return@composable
+            // Observe the repository so the status line follows the upload / training progress.
+            val rooms by graph.rooms.rooms().collectAsState()
+            val record = rooms.firstOrNull { it.id == roomId }?.captures?.firstOrNull { it.id == captureId }
+                ?: return@composable
+            PreviewScreen(record = record, onUpload = null, onRetake = null)
         }
         composable(Routes.VIEWER) { entry ->
             val roomId = entry.arguments?.getString("roomId") ?: return@composable

@@ -141,6 +141,7 @@ fun RoomScreen(
     onUpload: (captureId: String) -> Unit,
     onRetry: (captureId: String) -> Unit,
     onView: (captureId: String) -> Unit,
+    onViewPoints: (captureId: String) -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -181,6 +182,7 @@ fun RoomScreen(
                         onUpload = { onUpload(rec.id) },
                         onRetry = { onRetry(rec.id) },
                         onView = { onView(rec.id) },
+                        onViewPoints = { onViewPoints(rec.id) },
                     )
                 }
             }

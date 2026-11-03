@@ -11,6 +11,7 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -251,6 +252,12 @@ fun captureStatusText(record: CaptureRecord): String {
 /** "重试" resumes polling a known server job; "重新上传" sends the zip again. */
 fun retryButtonLabel(record: CaptureRecord): String = if (record.jobId != null) "重试" else "重新上传"
 
+/**
+ * Whether the row offers "看点云": the capture-time point cloud exists and the finished model is not there yet
+ * (once done, "查看 3D" is the better view).
+ */
+fun showsPointsButton(record: CaptureRecord): Boolean = record.pointsPath != null && record.state != "done"
+
 /** One capture: id, Chinese status, progress bar while uploading/training, and its action button. */
 @Composable
 fun CaptureRow(
@@ -258,14 +265,18 @@ fun CaptureRow(
     onUpload: () -> Unit,
     onRetry: () -> Unit,
     onView: () -> Unit,
+    onViewPoints: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Column(Modifier.weight(1f)) {
                     Text(record.id, style = MaterialTheme.typography.titleSmall)
                     Text(captureStatusText(record), style = MaterialTheme.typography.bodyMedium)
+                }
+                if (showsPointsButton(record)) {
+                    TextButton(onClick = onViewPoints) { Text("看点云") }
                 }
                 when (record.state) {
                     "local" -> Button(onClick = onUpload) { Text("上传") }
