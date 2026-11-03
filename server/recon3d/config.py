@@ -25,12 +25,15 @@ class Profile:
     far_m: float = 5.0
     bbox_margin_m: float = 5.0
     # Floater pruning (recon/contrib.py, recon/outliers.py). Contribution pruning renders every training
-    # view at half resolution and removes Gaussians visible (> 1 blended pixel at half resolution) in fewer
+    # view at half resolution and removes Gaussians visible (> contrib_view_px blended pixels at half resolution) in fewer
     # than contrib_min_views views, or whose total contribution is below contrib_min_px; it runs at iterations // 2,
     # 3 * iterations // 4 and once after training (both thresholds 0 disables it). The kNN statistical
     # outlier filter (k = 8) then removes isolated Gaussian centres beyond mean + sor_sigma * std (0 disables).
     contrib_min_views: int = 3
     contrib_min_px: float = 0.5
+    # A Gaussian counts as visible in a view when its blended weight there exceeds this many
+    # half-resolution pixels (the per-view threshold behind contrib_min_views).
+    contrib_view_px: float = 1.0
     sor_sigma: float = 3.0
     # Regularisers added to the loss every step (trainer.reg_loss): opacity_reg * mean(opacity) pushes
     # unneeded Gaussians towards transparency so they get pruned; scale_reg * mean(scale) discourages

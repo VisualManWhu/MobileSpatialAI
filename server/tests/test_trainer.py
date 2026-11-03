@@ -397,6 +397,7 @@ def test_reports_progress_every_100_steps(synthetic_ts):
 
 
 _CONTRIB_RE = re.compile(r"贡献度剪枝（步 (\d+)）：移除 (\d+) 个高斯")
+_CONTRIB_SPLIT_RE = re.compile(r"贡献度剪枝（步 \d+）：移除 (\d+) 个高斯.*；其中仅因视角数 (\d+)、仅因贡献 (\d+)、两者 (\d+)")
 _SOR_RE = re.compile(r"离群点滤波（k=8，[\d.]+σ）：移除 (\d+) 个高斯")
 
 
@@ -411,6 +412,10 @@ def test_training_prunes_by_contribution_and_logs(synthetic_ts, caplog, tmp_path
     sor = [m for msg in msgs if (m := _SOR_RE.search(msg))]
     # steps iters//2, 3*iters//4 and once after the loop
     assert [int(m.group(1)) for m in contrib] == [200, 300, 400]
+    splits = [m for msg in msgs if (m := _CONTRIB_SPLIT_RE.search(msg))]
+    assert len(splits) == 3
+    for m in splits:
+        assert int(m.group(1)) == sum(int(m.group(k)) for k in (2, 3, 4))
     assert len(sor) == 1
     assert splats.means.shape[0] > 0
     removed = sum(int(m.group(2)) for m in contrib) + int(sor[0].group(1))
@@ -431,8 +436,9 @@ def test_contribution_prune_never_empties(synthetic_ts):
 @pytest.mark.gpu
 def test_pruning_off_matches_old_behaviour(synthetic_ts, caplog, tmp_path):
     ts = synthetic_ts[0]
-    p = dataclasses.replace(PROFILES["laptop"], iterations=300, max_gaussians=20000,
-                            contrib_min_views=0, contrib_min_px=0.0, sor_sigma=0.0)
+    p = dataclasses.replace(PROFILES["laptop"], iterations=300, max_gaussians=20000, strategy="default",
+                            contrib_min_views=0, contrib_min_px=0.0, sor_sigma=0.0,
+                            opacity_reg=0.0, scale_reg=0.0)
     with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
         n = train(ts, p, on_progress=lambda p: None, pruned_out=tmp_path / "pruned.ply").means.shape[0]
     assert n > 0
@@ -477,19 +483,34 @@ def test_mcmc_contrib_prune_lowers_opacity_instead_of_removing(synthetic_ts):
     p = dataclasses.replace(PROFILES["laptop"], strategy="mcmc")
     viewmats = torch.linalg.inv(ts.c2w.cuda())
     H, W = ts.images.shape[1:3]
-    n_marked, marked = _prune_contrib(params, opts, state, viewmats, ts.K.cuda(), W, H, p, relocatable=True)
+    n_marked, marked, split = _prune_contrib(params, opts, state, viewmats, ts.K.cuda(), W, H, p, relocatable=True)
     assert n_marked >= 1
     assert len(params["means"]) == n
     assert marked is not None and marked.means.shape[0] == n_marked
+    assert marked.means.device.type == "cpu" and sum(split) == n_marked
     assert float(torch.sigmoid(marked.opacities).min()) == pytest.approx(0.5)  # sliced before lowering
     assert float(torch.sigmoid(params["opacities"][-1])) < 1e-3
     # after refine_stop_iter (relocatable=False) the same profile removes; the trainer passes an
     # empty state under MCMC because ops.remove would slice MCMC's "binoms" table
-    n_removed, removed = _prune_contrib(params, opts, {}, viewmats, ts.K.cuda(), W, H, p, relocatable=False)
+    n_removed, removed, _ = _prune_contrib(params, opts, {}, viewmats, ts.K.cuda(), W, H, p, relocatable=False)
     assert n_removed >= 1
     assert len(params["means"]) == n - n_removed
     assert removed is not None and removed.means.shape[0] == n_removed
     assert not (params["means"][:, 1] > 1e3).any()
+
+
+def test_contrib_pass_skipped_soon_after_opacity_reset():
+    from recon3d.recon.trainer import _contrib_pass_allowed
+
+    assert _contrib_pass_allowed(200, None)  # no reset yet
+    assert not _contrib_pass_allowed(300, 200)
+    assert not _contrib_pass_allowed(699, 200)
+    assert _contrib_pass_allowed(700, 200)  # gap reached
+    assert _contrib_pass_allowed(3000, 3000)  # same step: the reset runs after the pass
+    assert _contrib_pass_allowed(200, 100, min_gap=100) and not _contrib_pass_allowed(199, 100, min_gap=100)
+    # shipped profiles: laptop resets at 3000/6000 (refine_stop 7500), server up to 12000 (refine_stop 15000)
+    for iters, last in ((15000, 6000), (30000, 12000)):
+        assert all(_contrib_pass_allowed(s, last) for s in (iters // 2, 3 * iters // 4, iters))
 
 
 def test_unknown_strategy_rejected():

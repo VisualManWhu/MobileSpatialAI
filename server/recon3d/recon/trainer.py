@@ -275,71 +275,91 @@ def _enforce_cap(params, optimizers, state, max_gaussians: int) -> None:
 
 
 @torch.no_grad()
-def _cull_outside(params, optimizers, state, bounds: SceneBounds | None) -> int:
-    """Remove Gaussians outside the scene bounds; returns how many went. Never empties the set."""
+def _remove_masked(params, optimizers, state, mask: torch.Tensor, keep: bool) -> tuple[int, Splats | None]:
+    """Remove the masked Gaussians; returns (n_removed, removed Gaussians on the CPU if keep else None).
+
+    Never empties the set: a mask that selects nothing or everything removes nothing. The slice is
+    taken before removal and only when keep, so passes without a dump copy nothing.
+    """
     from gsplat.strategy.ops import remove
 
+    n = int(mask.sum())
+    if n == 0 or n == len(mask):
+        return 0, None
+    removed = _slice(params, mask) if keep else None
+    remove(params=params, optimizers=optimizers, state=state, mask=mask)
+    return n, removed
+
+
+@torch.no_grad()
+def _cull_outside(params, optimizers, state, bounds: SceneBounds | None) -> int:
+    """Remove Gaussians outside the scene bounds; returns how many went. Never empties the set."""
     if bounds is None or not bounds.enabled:
         return 0
-    keep = bounds.keep(params["means"])
-    n_out = int((~keep).sum())
-    if n_out == 0 or n_out == len(keep):
-        return 0
-    remove(params=params, optimizers=optimizers, state=state, mask=~keep)
-    return n_out
+    n, _ = _remove_masked(params, optimizers, state, ~bounds.keep(params["means"]), keep=False)
+    return n
 
 
 def _slice(params, mask: torch.Tensor) -> Splats:
-    """The masked Gaussians as a detached Splats (on the params' device)."""
-    return Splats(**{k: params[k][mask].detach().clone() for k in Splats.__dataclass_fields__})
+    """The masked Gaussians as a detached Splats on the CPU (masked indexing already copies)."""
+    return Splats(**{k: params[k][mask].detach().cpu() for k in Splats.__dataclass_fields__})
 
 
 def _cat_splats(parts: list[Splats]) -> Splats:
     return Splats(**{k: torch.cat([getattr(p, k) for p in parts]) for k in Splats.__dataclass_fields__})
 
 
+def _contrib_pass_allowed(step: int, last_reset_step: int | None, min_gap: int = 500) -> bool:
+    """Whether a contribution pass may run at step: not within min_gap steps after an opacity reset.
+
+    Right after a reset every opacity is low, so contributions are too and a pass would gut the scene.
+    """
+    return last_reset_step is None or not (0 < step - last_reset_step < min_gap)
+
+
 @torch.no_grad()
 def _prune_contrib(
-    params, optimizers, state, viewmats, Ks, W: int, H: int, profile: Profile, relocatable: bool = False
-) -> tuple[int, Splats | None]:
+    params, optimizers, state, viewmats, Ks, W: int, H: int, profile: Profile,
+    relocatable: bool = False, keep: bool = True,
+) -> tuple[int, Splats | None, tuple[int, int, int]]:
     """Remove Gaussians seen in too few views or contributing too little (recon/contrib.py).
 
-    Returns (n_removed, removed Gaussians or None). Never empties the set. With relocatable (MCMC
-    while relocation still runs) the marked Gaussians are not removed but get opacity 1e-4 so MCMC
-    relocates them; the returned slice is taken before that, so it shows what was pruned.
+    Returns (n_marked, marked Gaussians on the CPU or None, (only_views, only_total, both)): the
+    marked count split by which rule failed (view count only, total contribution only, both).
+    The slice is taken only when keep. Never empties the set (all counts 0 then). With relocatable
+    (MCMC while relocation still runs) the marked Gaussians are not removed but get opacity 1e-4
+    so MCMC relocates them; the slice is taken before that, so it shows what was marked.
     """
-    from gsplat.strategy.ops import remove
-
     from recon3d.recon.contrib import compute_contrib, prune_mask
 
-    total, nviews = compute_contrib(params, viewmats, Ks, W, H, downscale=2)
+    total, nviews = compute_contrib(params, viewmats, Ks, W, H, downscale=2, min_px=profile.contrib_view_px)
     mask = prune_mask(total, nviews, profile.contrib_min_views, profile.contrib_min_px)
     n = int(mask.sum())
     if n == 0 or n == len(mask):
-        return 0, None
-    removed = _slice(params, mask)
+        return 0, None, (0, 0, 0)
+    few_views = nviews < profile.contrib_min_views
+    low_total = total < profile.contrib_min_px
+    split = (
+        int((few_views & ~low_total).sum()),
+        int((~few_views & low_total).sum()),
+        int((few_views & low_total).sum()),
+    )
     if relocatable:
+        removed = _slice(params, mask) if keep else None
         params["opacities"].data[mask] = torch.logit(torch.tensor(1e-4)).item()
-    else:
-        remove(params=params, optimizers=optimizers, state=state, mask=mask)
-    return n, removed
+        return n, removed, split
+    n, removed = _remove_masked(params, optimizers, state, mask, keep)
+    return n, removed, split
 
 
 @torch.no_grad()
-def _prune_sor(params, optimizers, state, sigma: float) -> tuple[int, Splats | None]:
+def _prune_sor(params, optimizers, state, sigma: float, keep: bool = True) -> tuple[int, Splats | None]:
     """Remove statistical outliers among the Gaussian centres (k = 8). Never empties the set."""
-    from gsplat.strategy.ops import remove
-
     from recon3d.recon.outliers import sor_mask
 
     out = sor_mask(params["means"].detach().cpu().numpy(), k=8, sigma=sigma)
-    n = int(out.sum())
-    if n == 0 or n == len(out):
-        return 0, None
     mask = torch.from_numpy(out).to(params["means"].device)
-    removed = _slice(params, mask)
-    remove(params=params, optimizers=optimizers, state=state, mask=mask)
-    return n, removed
+    return _remove_masked(params, optimizers, state, mask, keep)
 
 
 def train(
@@ -374,17 +394,28 @@ def train(
     use_contrib = profile.contrib_min_views > 0 or profile.contrib_min_px > 0
     contrib_steps = {iters // 2, 3 * iters // 4} if use_contrib else set()
     pruned: list[Splats] = []
+    last_reset_step: int | None = None  # most recent manual opacity reset (default strategy only)
 
     def _contrib(at_step: int) -> None:
+        if not _contrib_pass_allowed(at_step, last_reset_step):
+            log.info("贡献度剪枝跳过（步 %d）：距上次不透明度重置仅 %d 步", at_step, at_step - last_reset_step)
+            return
         # Renders use the uncorrected viewmats (PoseRefine deltas ignored; pose_lr is 0 by default).
-        # Lowering opacity only helps while MCMC still relocates; later passes remove.
+        # MCMC: a pass before refine_stop_iter only lowers opacity so relocation can reuse those
+        # Gaussians (none with the current schedule: the first pass is at iters // 2 == refine_stop_iter).
         relocatable = mcmc and at_step < strategy.refine_stop_iter
-        n, removed = _prune_contrib(params, optimizers, rm_state, viewmats, Ks, W, H, profile, relocatable)
-        if removed is not None and pruned_out is not None:
+        # Relocated Gaussians stay in the model, so they are not part of the pruned dump.
+        keep = pruned_out is not None and not relocatable
+        n, removed, (only_views, only_total, both) = _prune_contrib(
+            params, optimizers, rm_state, viewmats, Ks, W, H, profile, relocatable, keep
+        )
+        if removed is not None:
             pruned.append(removed)
         log.info(
-            "贡献度剪枝（步 %d）：移除 %d 个高斯（<%d 个视角可见或贡献<%.1f px），剩余 %d" + ("（MCMC：压低不透明度）" if relocatable else ""),
+            "贡献度剪枝（步 %d）：移除 %d 个高斯（<%d 个视角可见或贡献<%.1f px），剩余 %d"
+            "；其中仅因视角数 %d、仅因贡献 %d、两者 %d" + ("（MCMC：压低不透明度）" if relocatable else ""),
             at_step, n, profile.contrib_min_views, profile.contrib_min_px, len(params["means"]),
+            only_views, only_total, both,
         )
 
     params = _init_params(ts, profile, device, bounds)
@@ -512,8 +543,8 @@ def train(
             opt.step()
             opt.zero_grad(set_to_none=True)
         means_sched.step()
-        # The strategy keeps running at the cap so pruning continues; growth past the
-        # cap is trimmed (lowest opacity first) right after.
+        # The strategy keeps running at the cap so pruning continues. Default strategy: growth
+        # past the cap is trimmed (lowest opacity first) by _enforce_cap below; MCMC caps itself.
         if mcmc:
             strategy.step_post_backward(params, optimizers, state, step, info, lr=means_sched.get_last_lr()[0])
         else:
@@ -529,6 +560,7 @@ def train(
             # always False by operator precedence), so do the strategy's reset here.
             if 0 < step < strategy.refine_stop_iter and step % strategy.reset_every == 0:
                 ops.reset_opa(params=params, optimizers=optimizers, state=state, value=strategy.prune_opa * 2.0)
+                last_reset_step = step
         if (step + 1) % PROGRESS_EVERY == 0 or step + 1 == iters:
             on_progress((step + 1) / iters)
 
@@ -541,8 +573,8 @@ def train(
         _contrib(iters)
     culled += _cull_outside(params, optimizers, rm_state, bounds)
     if profile.sor_sigma > 0:
-        n, removed = _prune_sor(params, optimizers, rm_state, profile.sor_sigma)
-        if removed is not None and pruned_out is not None:
+        n, removed = _prune_sor(params, optimizers, rm_state, profile.sor_sigma, keep=pruned_out is not None)
+        if removed is not None:
             pruned.append(removed)
         log.info("离群点滤波（k=8，%.1fσ）：移除 %d 个高斯，剩余 %d", profile.sor_sigma, n, len(params["means"]))
     if pruned_out is not None and pruned:

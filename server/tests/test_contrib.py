@@ -62,6 +62,7 @@ def test_contrib_handles_size_not_divisible_by_downscale(synthetic_ts):
     viewmats = torch.linalg.inv(tr.c2w.cuda())
     total, nviews = compute_contrib(params, viewmats, tr.K.cuda(), 255, 191, downscale=2)
     assert total.shape == (5,)
+    assert total.sum() > 0
 
 
 def test_prune_mask_thresholds():
