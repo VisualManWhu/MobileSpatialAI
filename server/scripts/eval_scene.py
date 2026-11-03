@@ -4,6 +4,7 @@ Usage (Ubuntu, from server/):
   uv run python scripts/eval_scene.py <job_dir> [--profile laptop]
       evaluates <job_dir>/scene.ply (or <job_dir>/retrain-<tag>/scene.ply with --tag)
   uv run python scripts/eval_scene.py <job_dir> --train [--tag NAME] [--pose-lr X] [--depth-lambda Y]
+                                                         [--far-m R] [--bbox-margin-m M]
       retrains capture.zip into <job_dir>/retrain-<tag>/ (default tag "new") with the job
       pipeline, then evaluates the new scene.ply
 
@@ -125,16 +126,25 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tag", default=None, help="重训目录名后缀（默认 new）")
     ap.add_argument("--pose-lr", type=float, default=None)
     ap.add_argument("--depth-lambda", type=float, default=None)
+    ap.add_argument("--far-m", type=float, default=None, help="场景范围：距最近相机的最大距离（0 关闭）")
+    ap.add_argument("--bbox-margin-m", type=float, default=None, help="场景范围：相机包围盒外扩距离（0 关闭）")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
     job_dir = args.job_dir.resolve()
     profile = PROFILES[args.profile]
     overrides = {
-        k: v for k, v in (("pose_lr", args.pose_lr), ("depth_lambda", args.depth_lambda)) if v is not None
+        k: v
+        for k, v in (
+            ("pose_lr", args.pose_lr),
+            ("depth_lambda", args.depth_lambda),
+            ("far_m", args.far_m),
+            ("bbox_margin_m", args.bbox_margin_m),
+        )
+        if v is not None
     }
     if overrides and not args.train:
-        ap.error("--pose-lr / --depth-lambda 只能和 --train 一起用")
+        ap.error("--pose-lr / --depth-lambda / --far-m / --bbox-margin-m 只能和 --train 一起用")
     profile = dataclasses.replace(profile, **overrides)
 
     train_s = None
