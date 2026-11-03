@@ -39,7 +39,8 @@ class Profile:
     scale_reg: float = 0.01
     # Densification strategy: "default" (gsplat DefaultStrategy: clone/split/prune plus our cap and opacity
     # reset) or "mcmc" (gsplat MCMCStrategy: relocates dead Gaussians and grows up to max_gaussians).
-    # Under MCMC contribution pruning lowers opacity instead of removing, so MCMC relocates those Gaussians.
+    # MCMC: contribution-pruning passes during relocation (step < refine_stop_iter) lower opacity so relocation
+    # can reuse those Gaussians; passes at or after refine_stop_iter remove, as with "default".
     strategy: str = "default"
 
 

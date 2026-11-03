@@ -300,13 +300,13 @@ def _cat_splats(parts: list[Splats]) -> Splats:
 
 @torch.no_grad()
 def _prune_contrib(
-    params, optimizers, state, viewmats, Ks, W: int, H: int, profile: Profile
+    params, optimizers, state, viewmats, Ks, W: int, H: int, profile: Profile, relocatable: bool = False
 ) -> tuple[int, Splats | None]:
     """Remove Gaussians seen in too few views or contributing too little (recon/contrib.py).
 
-    Returns (n_removed, removed Gaussians or None). Never empties the set. Under the MCMC strategy
-    the marked Gaussians are not removed but get opacity 1e-4 (MCMC relocates dead Gaussians);
-    the returned slice is taken before that, so it shows what was pruned.
+    Returns (n_removed, removed Gaussians or None). Never empties the set. With relocatable (MCMC
+    while relocation still runs) the marked Gaussians are not removed but get opacity 1e-4 so MCMC
+    relocates them; the returned slice is taken before that, so it shows what was pruned.
     """
     from gsplat.strategy.ops import remove
 
@@ -318,7 +318,7 @@ def _prune_contrib(
     if n == 0 or n == len(mask):
         return 0, None
     removed = _slice(params, mask)
-    if profile.strategy == "mcmc":
+    if relocatable:
         params["opacities"].data[mask] = torch.logit(torch.tensor(1e-4)).item()
     else:
         remove(params=params, optimizers=optimizers, state=state, mask=mask)
@@ -377,11 +377,13 @@ def train(
 
     def _contrib(at_step: int) -> None:
         # Renders use the uncorrected viewmats (PoseRefine deltas ignored; pose_lr is 0 by default).
-        n, removed = _prune_contrib(params, optimizers, state, viewmats, Ks, W, H, profile)
+        # Lowering opacity only helps while MCMC still relocates; later passes remove.
+        relocatable = mcmc and at_step < strategy.refine_stop_iter
+        n, removed = _prune_contrib(params, optimizers, rm_state, viewmats, Ks, W, H, profile, relocatable)
         if removed is not None and pruned_out is not None:
             pruned.append(removed)
         log.info(
-            "贡献度剪枝（步 %d）：移除 %d 个高斯（<%d 个视角可见或贡献<%.1f px），剩余 %d" + ("（MCMC：压低不透明度）" if mcmc else ""),
+            "贡献度剪枝（步 %d）：移除 %d 个高斯（<%d 个视角可见或贡献<%.1f px），剩余 %d" + ("（MCMC：压低不透明度）" if relocatable else ""),
             at_step, n, profile.contrib_min_views, profile.contrib_min_px, len(params["means"]),
         )
 

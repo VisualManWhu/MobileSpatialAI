@@ -477,12 +477,19 @@ def test_mcmc_contrib_prune_lowers_opacity_instead_of_removing(synthetic_ts):
     p = dataclasses.replace(PROFILES["laptop"], strategy="mcmc")
     viewmats = torch.linalg.inv(ts.c2w.cuda())
     H, W = ts.images.shape[1:3]
-    n_marked, marked = _prune_contrib(params, opts, state, viewmats, ts.K.cuda(), W, H, p)
+    n_marked, marked = _prune_contrib(params, opts, state, viewmats, ts.K.cuda(), W, H, p, relocatable=True)
     assert n_marked >= 1
     assert len(params["means"]) == n
     assert marked is not None and marked.means.shape[0] == n_marked
     assert float(torch.sigmoid(marked.opacities).min()) == pytest.approx(0.5)  # sliced before lowering
     assert float(torch.sigmoid(params["opacities"][-1])) < 1e-3
+    # after refine_stop_iter (relocatable=False) the same profile removes; the trainer passes an
+    # empty state under MCMC because ops.remove would slice MCMC's "binoms" table
+    n_removed, removed = _prune_contrib(params, opts, {}, viewmats, ts.K.cuda(), W, H, p, relocatable=False)
+    assert n_removed >= 1
+    assert len(params["means"]) == n - n_removed
+    assert removed is not None and removed.means.shape[0] == n_removed
+    assert not (params["means"][:, 1] > 1e3).any()
 
 
 def test_unknown_strategy_rejected():
