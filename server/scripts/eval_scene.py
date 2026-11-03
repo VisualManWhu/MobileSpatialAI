@@ -36,6 +36,11 @@ from recon3d.config import PROFILES, Profile  # noqa: E402
 FLOATER_OPACITY = 0.5
 FLOATER_DIST_M = 0.10
 WORST_K = 5
+# Profile fields recorded in eval.json; only known (and reported) when this run trained the ply.
+TRAIN_SETTINGS = (
+    "depth_lambda", "pose_lr", "strategy", "far_m", "bbox_margin_m", "contrib_min_views",
+    "contrib_min_px", "contrib_view_px", "sor_sigma", "opacity_reg", "scale_reg",
+)
 
 
 def _train(job_dir: Path, out_dir: Path, profile: Profile) -> float:
@@ -124,6 +129,15 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack
         "profile": profile.name,
         "depth_lambda": profile.depth_lambda,
         "pose_lr": profile.pose_lr,
+        "strategy": profile.strategy,
+        "far_m": profile.far_m,
+        "bbox_margin_m": profile.bbox_margin_m,
+        "contrib_min_views": profile.contrib_min_views,
+        "contrib_min_px": profile.contrib_min_px,
+        "contrib_view_px": profile.contrib_view_px,
+        "sor_sigma": profile.sor_sigma,
+        "opacity_reg": profile.opacity_reg,
+        "scale_reg": profile.scale_reg,
         "views": int(len(psnr)),
         "psnr_median": float(np.median(psnr)),
         "psnr_min": float(psnr.min()),
@@ -150,6 +164,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--bbox-margin-m", type=float, default=None, help="场景范围：相机包围盒外扩距离（0 关闭）")
     ap.add_argument("--contrib-min-views", type=int, default=None, help="贡献度剪枝：最少可见视角数（与 --contrib-min-px 都为 0 时关闭）")
     ap.add_argument("--contrib-min-px", type=float, default=None, help="贡献度剪枝：最小贡献像素数（与 --contrib-min-views 都为 0 时关闭）")
+    ap.add_argument("--contrib-view-px", type=float, default=None, help="贡献度剪枝：单个视角算作可见的最小混合像素数（半分辨率）")
     ap.add_argument("--sor-sigma", type=float, default=None, help="离群点滤波：均值外的标准差倍数（0 关闭）")
     ap.add_argument("--opacity-reg", type=float, default=None, help="不透明度正则权重（0 关闭）")
     ap.add_argument("--scale-reg", type=float, default=None, help="尺度正则权重（0 关闭）")
@@ -169,6 +184,7 @@ def main(argv: list[str] | None = None) -> int:
             ("bbox_margin_m", args.bbox_margin_m),
             ("contrib_min_views", args.contrib_min_views),
             ("contrib_min_px", args.contrib_min_px),
+            ("contrib_view_px", args.contrib_view_px),
             ("sor_sigma", args.sor_sigma),
             ("opacity_reg", args.opacity_reg),
             ("scale_reg", args.scale_reg),
@@ -179,7 +195,7 @@ def main(argv: list[str] | None = None) -> int:
     if (overrides or args.dump_pruned) and not args.train:
         ap.error(
             "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --contrib-min-views / --contrib-min-px"
-            " / --sor-sigma / --opacity-reg / --scale-reg / --strategy / --dump-pruned 只能和 --train 一起用"
+            " / --contrib-view-px / --sor-sigma / --opacity-reg / --scale-reg / --strategy / --dump-pruned 只能和 --train 一起用"
         )
     profile = dataclasses.replace(profile, **overrides)
 
@@ -189,7 +205,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"重训到 {out_dir}（depth_lambda={profile.depth_lambda}, pose_lr={profile.pose_lr}, strategy={profile.strategy}）", flush=True)
         if args.dump_pruned:
             os.environ["RECON3D_DUMP_PRUNED"] = "1"
-        train_s = _train(job_dir, out_dir, profile)
+        try:
+            train_s = _train(job_dir, out_dir, profile)
+        finally:
+            os.environ.pop("RECON3D_DUMP_PRUNED", None)
         if args.dump_pruned and (out_dir / "pruned.ply").exists():
             print(f"被剪高斯已写入 {out_dir / 'pruned.ply'}", flush=True)
     else:
@@ -199,8 +218,8 @@ def main(argv: list[str] | None = None) -> int:
     res = evaluate(job_dir, ply, profile, out_dir, args.offtrack_m, args.offtrack_views)
     if not args.train:
         # Training settings of an existing ply are unknown; don't report the profile's.
-        res.pop("depth_lambda")
-        res.pop("pose_lr")
+        for k in TRAIN_SETTINGS:
+            res.pop(k)
     res["train_seconds"] = train_s
 
     print(f"模型：{ply}")
