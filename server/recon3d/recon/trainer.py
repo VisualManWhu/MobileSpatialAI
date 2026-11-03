@@ -304,7 +304,9 @@ def _prune_contrib(
 ) -> tuple[int, Splats | None]:
     """Remove Gaussians seen in too few views or contributing too little (recon/contrib.py).
 
-    Returns (n_removed, removed Gaussians or None). Never empties the set.
+    Returns (n_removed, removed Gaussians or None). Never empties the set. Under the MCMC strategy
+    the marked Gaussians are not removed but get opacity 1e-4 (MCMC relocates dead Gaussians);
+    the returned slice is taken before that, so it shows what was pruned.
     """
     from gsplat.strategy.ops import remove
 
@@ -316,7 +318,10 @@ def _prune_contrib(
     if n == 0 or n == len(mask):
         return 0, None
     removed = _slice(params, mask)
-    remove(params=params, optimizers=optimizers, state=state, mask=mask)
+    if profile.strategy == "mcmc":
+        params["opacities"].data[mask] = torch.logit(torch.tensor(1e-4)).item()
+    else:
+        remove(params=params, optimizers=optimizers, state=state, mask=mask)
     return n, removed
 
 
@@ -349,9 +354,12 @@ def train(
     With pruned_out, every Gaussian removed by contribution pruning or the outlier filter
     (not bounds culling) is written there as a PLY once training ends (nothing written if none).
     """
-    from gsplat import DefaultStrategy
+    if profile.strategy not in ("default", "mcmc"):
+        raise ValueError(f"未知的训练策略：{profile.strategy}")
+    from gsplat import DefaultStrategy, MCMCStrategy
     from gsplat.strategy import ops
 
+    mcmc = profile.strategy == "mcmc"
     iters = profile.iterations
     # The image stack stays on the CPU (a real capture is GBs of float32); one frame is
     # copied to the GPU per step. Not pinned: pinning multi-GB host buffers is unreliable
@@ -373,7 +381,7 @@ def train(
         if removed is not None and pruned_out is not None:
             pruned.append(removed)
         log.info(
-            "贡献度剪枝（步 %d）：移除 %d 个高斯（<%d 个视角可见或贡献<%.1f px），剩余 %d",
+            "贡献度剪枝（步 %d）：移除 %d 个高斯（<%d 个视角可见或贡献<%.1f px），剩余 %d" + ("（MCMC：压低不透明度）" if mcmc else ""),
             at_step, n, profile.contrib_min_views, profile.contrib_min_px, len(params["means"]),
         )
 
@@ -393,14 +401,30 @@ def train(
     means_sched = torch.optim.lr_scheduler.ExponentialLR(
         optimizers["means"], gamma=0.01 ** (1.0 / iters)
     )
-    strategy = DefaultStrategy(
-        refine_start_iter=min(500, iters // 10),
-        refine_stop_iter=iters // 2,
-        reset_every=RESET_EVERY,
-        refine_every=100,
-    )
-    strategy.check_sanity(params, optimizers)
-    state = strategy.initialize_state(scene_scale=scene_scale)
+    if mcmc:
+        # cap_max bounds the count, so _enforce_cap is not needed; MCMC has no opacity reset.
+        strategy = MCMCStrategy(
+            cap_max=profile.max_gaussians,
+            refine_start_iter=min(500, iters // 10),
+            refine_stop_iter=iters // 2,
+            refine_every=100,
+            min_opacity=0.005,
+        )
+        strategy.check_sanity(params, optimizers)
+        state = strategy.initialize_state()
+        # ops.remove slices every tensor in state, but MCMC's only entry ("binoms") is a lookup
+        # table, not per-Gaussian; MCMC keeps no per-Gaussian running state, so removals get none.
+        rm_state: dict = {}
+    else:
+        strategy = DefaultStrategy(
+            refine_start_iter=min(500, iters // 10),
+            refine_stop_iter=iters // 2,
+            reset_every=RESET_EVERY,
+            refine_every=100,
+        )
+        strategy.check_sanity(params, optimizers)
+        state = strategy.initialize_state(scene_scale=scene_scale)
+        rm_state = state
     window = _gaussian_window(device=device)
     gen = torch.Generator().manual_seed(0)
     t_start = time.monotonic()
@@ -488,17 +512,21 @@ def train(
         means_sched.step()
         # The strategy keeps running at the cap so pruning continues; growth past the
         # cap is trimmed (lowest opacity first) right after.
-        strategy.step_post_backward(params, optimizers, state, step, info, packed=PACKED)
+        if mcmc:
+            strategy.step_post_backward(params, optimizers, state, step, info, lr=means_sched.get_last_lr()[0])
+        else:
+            strategy.step_post_backward(params, optimizers, state, step, info, packed=PACKED)
         # Floaters that densified or drifted out of the room go at the strategy's cadence.
         if step > 0 and step % strategy.refine_every == 0:
-            culled += _cull_outside(params, optimizers, state, bounds)
+            culled += _cull_outside(params, optimizers, rm_state, bounds)
         if step in contrib_steps:
             _contrib(step)
-        _enforce_cap(params, optimizers, state, profile.max_gaussians)
-        # gsplat 1.5.3 never resets opacity (`step % reset_every == 0 & step > 0` is
-        # always False by operator precedence), so do the strategy's reset here.
-        if 0 < step < strategy.refine_stop_iter and step % strategy.reset_every == 0:
-            ops.reset_opa(params=params, optimizers=optimizers, state=state, value=strategy.prune_opa * 2.0)
+        if not mcmc:
+            _enforce_cap(params, optimizers, state, profile.max_gaussians)
+            # gsplat 1.5.3 never resets opacity (`step % reset_every == 0 & step > 0` is
+            # always False by operator precedence), so do the strategy's reset here.
+            if 0 < step < strategy.refine_stop_iter and step % strategy.reset_every == 0:
+                ops.reset_opa(params=params, optimizers=optimizers, state=state, value=strategy.prune_opa * 2.0)
         if (step + 1) % PROGRESS_EVERY == 0 or step + 1 == iters:
             on_progress((step + 1) / iters)
 
@@ -509,9 +537,9 @@ def train(
         )
     if use_contrib:
         _contrib(iters)
-    culled += _cull_outside(params, optimizers, state, bounds)
+    culled += _cull_outside(params, optimizers, rm_state, bounds)
     if profile.sor_sigma > 0:
-        n, removed = _prune_sor(params, optimizers, state, profile.sor_sigma)
+        n, removed = _prune_sor(params, optimizers, rm_state, profile.sor_sigma)
         if removed is not None and pruned_out is not None:
             pruned.append(removed)
         log.info("离群点滤波（k=8，%.1fσ）：移除 %d 个高斯，剩余 %d", profile.sor_sigma, n, len(params["means"]))

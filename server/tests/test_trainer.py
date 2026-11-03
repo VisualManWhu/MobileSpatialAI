@@ -439,3 +439,55 @@ def test_pruning_off_matches_old_behaviour(synthetic_ts, caplog, tmp_path):
     msgs = [r.getMessage() for r in caplog.records]
     assert not any("贡献度剪枝" in m or "离群点滤波" in m for m in msgs)
     assert not (tmp_path / "pruned.ply").exists()
+
+
+@pytest.mark.gpu
+def test_trains_with_mcmc_within_cap(synthetic_ts):
+    tr, te = synthetic_ts
+    p = dataclasses.replace(PROFILES["laptop"], iterations=1500, max_gaussians=30000, strategy="mcmc")
+    splats = train(tr, p, on_progress=lambda p: None)
+    assert 0 < splats.means.shape[0] <= 30000
+    assert psnr(render(splats, te), te.images) > 20.0
+
+
+@pytest.mark.gpu
+def test_mcmc_contrib_prune_lowers_opacity_instead_of_removing(synthetic_ts):
+    from gsplat import MCMCStrategy
+
+    from recon3d.recon.trainer import _prune_contrib
+
+    ts = synthetic_ts[0]
+    xyz, rgb = init_points(ts)
+    xyz, rgb = torch.from_numpy(xyz[:2000]).cuda(), torch.from_numpy(rgb[:2000]).cuda()
+    # one Gaussian far outside every camera's view: nviews 0, so it is marked
+    means = torch.cat([xyz, torch.tensor([[0.0, 1e4, 0.0]], device="cuda")])
+    n = len(means)
+    params = torch.nn.ParameterDict(
+        {
+            "means": torch.nn.Parameter(means),
+            "scales": torch.nn.Parameter(torch.full((n, 3), -4.0, device="cuda")),
+            "quats": torch.nn.Parameter(torch.tensor([[1.0, 0, 0, 0]], device="cuda").repeat(n, 1)),
+            "opacities": torch.nn.Parameter(torch.zeros(n, device="cuda")),
+            "sh0": torch.nn.Parameter(torch.cat([rgb, rgb[:1]])[:, None, :]),
+            "shN": torch.nn.Parameter(torch.zeros(n, 3, 3, device="cuda")),
+        }
+    )
+    opts = {k: torch.optim.Adam([{"params": v, "name": k}]) for k, v in params.items()}
+    state = MCMCStrategy().initialize_state()
+    p = dataclasses.replace(PROFILES["laptop"], strategy="mcmc")
+    viewmats = torch.linalg.inv(ts.c2w.cuda())
+    H, W = ts.images.shape[1:3]
+    n_marked, marked = _prune_contrib(params, opts, state, viewmats, ts.K.cuda(), W, H, p)
+    assert n_marked >= 1
+    assert len(params["means"]) == n
+    assert marked is not None and marked.means.shape[0] == n_marked
+    assert float(torch.sigmoid(marked.opacities).min()) == pytest.approx(0.5)  # sliced before lowering
+    assert float(torch.sigmoid(params["opacities"][-1])) < 1e-3
+
+
+def test_unknown_strategy_rejected():
+    from recon3d.recon.dataset import TrainingSet
+
+    ts = TrainingSet(images=torch.zeros(1, 4, 4, 3), K=torch.eye(3)[None], c2w=torch.eye(4)[None], depths=[None])
+    with pytest.raises(ValueError, match="未知的训练策略"):
+        train(ts, dataclasses.replace(PROFILES["laptop"], strategy="foo"), on_progress=lambda p: None, device="cpu")

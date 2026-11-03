@@ -153,6 +153,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sor-sigma", type=float, default=None, help="离群点滤波：均值外的标准差倍数（0 关闭）")
     ap.add_argument("--opacity-reg", type=float, default=None, help="不透明度正则权重（0 关闭）")
     ap.add_argument("--scale-reg", type=float, default=None, help="尺度正则权重（0 关闭）")
+    ap.add_argument("--strategy", default=None, choices=["default", "mcmc"], help="致密化策略（default 或 mcmc）")
     ap.add_argument("--dump-pruned", action="store_true", help="把贡献度剪枝和离群点滤波移除的高斯写入 pruned.ply（需 --train）")
     args = ap.parse_args(argv)
 
@@ -171,20 +172,21 @@ def main(argv: list[str] | None = None) -> int:
             ("sor_sigma", args.sor_sigma),
             ("opacity_reg", args.opacity_reg),
             ("scale_reg", args.scale_reg),
+            ("strategy", args.strategy),
         )
         if v is not None
     }
     if (overrides or args.dump_pruned) and not args.train:
         ap.error(
             "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --contrib-min-views / --contrib-min-px"
-            " / --sor-sigma / --opacity-reg / --scale-reg / --dump-pruned 只能和 --train 一起用"
+            " / --sor-sigma / --opacity-reg / --scale-reg / --strategy / --dump-pruned 只能和 --train 一起用"
         )
     profile = dataclasses.replace(profile, **overrides)
 
     train_s = None
     if args.train:
         out_dir = job_dir / f"retrain-{args.tag or 'new'}"
-        print(f"重训到 {out_dir}（depth_lambda={profile.depth_lambda}, pose_lr={profile.pose_lr}）", flush=True)
+        print(f"重训到 {out_dir}（depth_lambda={profile.depth_lambda}, pose_lr={profile.pose_lr}, strategy={profile.strategy}）", flush=True)
         if args.dump_pruned:
             os.environ["RECON3D_DUMP_PRUNED"] = "1"
         train_s = _train(job_dir, out_dir, profile)
