@@ -18,6 +18,12 @@ class Profile:
     # Pose refinement is opt-in (0 = off): on the office capture it lost 2.2 dB PSNR, removed fewer floaters
     # and cost +50% time (docs/acceptance/phase1.md section 5).
     pose_lr: float = 0.0
+    # Scene bounds (recon/bounds.py): a Gaussian survives only within far_m of the nearest camera position
+    # and inside the camera bounding box grown by bbox_margin_m. Far depth is noise and Gaussians that
+    # drift out of the room are floaters. 0 disables a criterion. Applied to the initial cloud, at every
+    # densification step and once more at the end of training.
+    far_m: float = 5.0
+    bbox_margin_m: float = 5.0
 
 
 PROFILES: dict[str, Profile] = {

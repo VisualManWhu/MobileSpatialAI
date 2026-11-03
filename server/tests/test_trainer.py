@@ -265,6 +265,50 @@ def test_enforce_cap_prunes_lowest_opacity():
 
 
 @pytest.mark.gpu
+def test_cull_outside_removes_far_gaussians_only():
+    from gsplat import DefaultStrategy
+
+    from recon3d.recon.bounds import SceneBounds
+    from recon3d.recon.trainer import _cull_outside
+
+    c2w = torch.eye(4).repeat(2, 1, 1)
+    c2w[1, 0, 3] = 2.0
+    bounds = SceneBounds.from_c2w(c2w, far_m=3.0, bbox_margin_m=3.0)
+    means = torch.tensor([[0.0, 0, 0], [4.0, 0, 0], [0, 0, 3.5], [1.0, 1.0, 1.0]], device="cuda")
+    n = len(means)
+    params = torch.nn.ParameterDict(
+        {
+            "means": torch.nn.Parameter(means),
+            "scales": torch.nn.Parameter(torch.zeros(n, 3, device="cuda")),
+            "quats": torch.nn.Parameter(torch.rand(n, 4, device="cuda")),
+            "opacities": torch.nn.Parameter(torch.arange(n, device="cuda", dtype=torch.float32)),
+        }
+    )
+    opts = {k: torch.optim.Adam([{"params": v, "name": k}]) for k, v in params.items()}
+    state = DefaultStrategy().initialize_state()
+    assert _cull_outside(params, opts, state, bounds) == 1  # only (0,0,3.5) is > 3 m from both cameras
+    assert params["opacities"].tolist() == [0.0, 1.0, 3.0]
+    assert _cull_outside(params, opts, state, None) == 0
+    # never empties the set: nothing is within 1 mm of a camera at z = 5
+    far_cams = c2w.clone()
+    far_cams[:, 2, 3] = 5.0
+    tiny = SceneBounds.from_c2w(far_cams, far_m=1e-3, bbox_margin_m=0.0)
+    assert _cull_outside(params, opts, state, tiny) == 0
+    assert len(params["means"]) == 3
+
+
+@pytest.mark.gpu
+def test_training_culls_gaussians_outside_bounds(synthetic_ts, caplog):
+    ts = synthetic_ts[0]
+    p = dataclasses.replace(PROFILES["laptop"], iterations=300, max_gaussians=20000, far_m=1e-3, bbox_margin_m=0.0)
+    # far_m this small keeps only Gaussians sitting on a camera: the cull must still never empty the set
+    with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
+        splats = train(ts, p, on_progress=lambda p: None)
+    assert splats.means.shape[0] > 0
+    assert any("场景范围裁剪" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.gpu
 def test_image_stack_not_resident_on_gpu(synthetic_ts):
     # 16x the train views (384 frames) kept on CPU; only one frame per step may go to GPU.
     tr = synthetic_ts[0]

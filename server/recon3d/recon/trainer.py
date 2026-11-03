@@ -16,6 +16,7 @@ import torch
 import torch.nn.functional as F
 
 from recon3d.config import Profile
+from recon3d.recon.bounds import SceneBounds
 from recon3d.recon.dataset import TrainingSet
 from recon3d.recon.init_points import init_points
 from recon3d.recon.pose_opt import PoseRefine
@@ -214,8 +215,15 @@ def _scene_scale(c2w: torch.Tensor) -> float:
     return float((centers - centers.mean(0)).norm(dim=1).max()) * 1.1
 
 
-def _init_params(ts: TrainingSet, profile: Profile, device: str) -> torch.nn.ParameterDict:
+def _init_params(
+    ts: TrainingSet, profile: Profile, device: str, bounds: SceneBounds | None = None
+) -> torch.nn.ParameterDict:
     xyz, rgb = init_points(ts)
+    if bounds is not None and bounds.enabled:
+        keep = bounds.keep_np(xyz)
+        if 0 < keep.sum() < len(xyz):
+            log.info("初始点云裁掉场景范围外的 %d/%d 个点", len(xyz) - int(keep.sum()), len(xyz))
+            xyz, rgb = xyz[keep], rgb[keep]
     if len(xyz) > profile.max_gaussians:
         idx = np.random.default_rng(0).choice(len(xyz), profile.max_gaussians, replace=False)
         xyz, rgb = xyz[idx], rgb[idx]
@@ -255,6 +263,21 @@ def _enforce_cap(params, optimizers, state, max_gaussians: int) -> None:
     remove(params=params, optimizers=optimizers, state=state, mask=mask)
 
 
+@torch.no_grad()
+def _cull_outside(params, optimizers, state, bounds: SceneBounds | None) -> int:
+    """Remove Gaussians outside the scene bounds; returns how many went. Never empties the set."""
+    from gsplat.strategy.ops import remove
+
+    if bounds is None or not bounds.enabled:
+        return 0
+    keep = bounds.keep(params["means"])
+    n_out = int((~keep).sum())
+    if n_out == 0 or n_out == len(keep):
+        return 0
+    remove(params=params, optimizers=optimizers, state=state, mask=~keep)
+    return n_out
+
+
 def train(
     ts: TrainingSet,
     profile: Profile,
@@ -274,8 +297,10 @@ def train(
     Ks = ts.K.to(device)
     n_img, H, W = images.shape[:3]
     scene_scale = _scene_scale(ts.c2w.to(device))
+    bounds = SceneBounds.from_c2w(ts.c2w, profile.far_m, profile.bbox_margin_m)
+    culled = 0
 
-    params = _init_params(ts, profile, device)
+    params = _init_params(ts, profile, device, bounds)
     lrs = {
         "means": 1.6e-4 * scene_scale,
         "scales": 5e-3,
@@ -385,6 +410,9 @@ def train(
         # The strategy keeps running at the cap so pruning continues; growth past the
         # cap is trimmed (lowest opacity first) right after.
         strategy.step_post_backward(params, optimizers, state, step, info, packed=PACKED)
+        # Floaters that densified or drifted out of the room go at the strategy's cadence.
+        if step > 0 and step % strategy.refine_every == 0:
+            culled += _cull_outside(params, optimizers, state, bounds)
         _enforce_cap(params, optimizers, state, profile.max_gaussians)
         # gsplat 1.5.3 never resets opacity (`step % reset_every == 0 & step > 0` is
         # always False by operator precedence), so do the strategy's reset here.
@@ -397,6 +425,12 @@ def train(
         log.info(
             "深度约束用于 %d/%d 个有深度的帧（其中 %d 帧按深度自身位姿单独渲染）",
             sum(depth_used), sum(has_depth), n_depth_view,
+        )
+    culled += _cull_outside(params, optimizers, state, bounds)
+    if bounds.enabled:
+        log.info(
+            "场景范围裁剪（距最近相机 ≤ %.1f m，相机包围盒外扩 %.1f m）：训练中共移除 %d 个高斯，剩余 %d",
+            profile.far_m, profile.bbox_margin_m, culled, len(params["means"]),
         )
     log.info("训练耗时 %.1f s（%d 步）", time.monotonic() - t_start, iters)
     _log_pose_stats(pose)
