@@ -63,7 +63,7 @@ def _train(job_dir: Path, out_dir: Path, profile: Profile) -> float:
     return time.monotonic() - t0
 
 
-def evaluate(job_dir: Path, ply: Path, profile: Profile) -> dict:
+def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack_m: float = 0.5, offtrack_views: int = 12) -> dict:
     import torch
     from scipy.spatial import cKDTree
 
@@ -90,6 +90,23 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile) -> dict:
         psnr[i] = 10.0 * np.log10(1.0 / max(mse, 1e-12))
         del img
 
+    offtrack_png = None
+    if offtrack_m > 0 and offtrack_views > 0:
+        import cv2  # lazy: only available via `uv run --with opencv-python-headless`
+
+        from recon3d.recon.offtrack import contact_sheet, pick_views, raise_cameras
+
+        c2w_up = raise_cameras(ts.c2w, offtrack_m)
+        tiles = []
+        for i in pick_views(len(ts.c2w), offtrack_views):
+            view = TrainingSet(images=ts.images[i : i + 1], K=ts.K[i : i + 1], c2w=c2w_up[i : i + 1], depths=[None])
+            img = render(splats, view)[0].clamp(0, 1).mul(255).round().byte().cpu().numpy()
+            tiles.append(np.ascontiguousarray(img[..., ::-1]))  # RGB -> BGR for cv2
+            del img
+        if tiles:
+            offtrack_png = out_dir / "offtrack.png"
+            cv2.imwrite(str(offtrack_png), contact_sheet(tiles, cols=4))
+
     xyz, _ = init_points(ts, min_points=0)
     alpha = torch.sigmoid(splats.opacities).cpu().numpy()
     means = splats.means.cpu().numpy()[alpha > FLOATER_OPACITY]
@@ -115,6 +132,7 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile) -> dict:
         "opaque_gaussians": int(len(means)),
         "init_points": int(len(xyz)),
         "floater_score": floater,
+        "offtrack_png": str(offtrack_png) if offtrack_png else None,
     }
 
 
@@ -126,6 +144,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--tag", default=None, help="重训目录名后缀（默认 new）")
     ap.add_argument("--pose-lr", type=float, default=None)
     ap.add_argument("--depth-lambda", type=float, default=None)
+    ap.add_argument("--offtrack-m", type=float, default=0.5, help="偏离轨迹渲染：相机抬高的米数（0 关闭）")
+    ap.add_argument("--offtrack-views", type=int, default=12, help="偏离轨迹渲染：拼图的视角数")
     ap.add_argument("--far-m", type=float, default=None, help="场景范围：距最近相机的最大距离（0 关闭）")
     ap.add_argument("--bbox-margin-m", type=float, default=None, help="场景范围：相机包围盒外扩距离（0 关闭）")
     args = ap.parse_args(argv)
@@ -156,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir = job_dir / f"retrain-{args.tag}" if args.tag else job_dir
     ply = out_dir / "scene.ply"
 
-    res = evaluate(job_dir, ply, profile)
+    res = evaluate(job_dir, ply, profile, out_dir, args.offtrack_m, args.offtrack_views)
     if not args.train:
         # Training settings of an existing ply are unknown; don't report the profile's.
         res.pop("depth_lambda")
@@ -173,6 +193,8 @@ def main(argv: list[str] | None = None) -> int:
         f"离初始点云（{res['init_points']} 点）>{FLOATER_DIST_M:.2f} m 的比例）"
     )
     print(f"高斯总数：{res['gaussians']}")
+    if res["offtrack_png"]:
+        print(f"偏离轨迹（抬高 {args.offtrack_m:g} m）渲染：{res['offtrack_png']}")
     if train_s is not None:
         print(f"训练用时：{train_s / 60:.1f} 分钟（{train_s:.0f} s）")
     (out_dir / "eval.json").write_text(json.dumps(res, ensure_ascii=False, indent=2), encoding="utf-8")
