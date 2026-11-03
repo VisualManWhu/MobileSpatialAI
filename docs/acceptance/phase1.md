@@ -101,7 +101,7 @@
   拍摄包 zip 里 `conf/` 文件数应等于 fresh 数；用上面的 Ubuntu 命令加 `print(sum(f.depth_pose is not None for f in c.frames))` 可数出带 `depth_pose` 的帧数，应与 fresh 一致
 - [ ] logcat 中 `CaptureRenderer: intrinsics: …`（每次拍摄一行）记下：CPU 图像尺寸、CPU 内参（imageIntrinsics 的尺寸与 f、c）、纹理内参（textureIntrinsics 的尺寸与 f、c）、深度图尺寸与写入的 depth k。
   若纹理与 CPU 图像宽高比不同，说明深度内参确实需要单独记录（拍摄包里每帧的 `depth_fx/fy/cx/cy`）
-- [ ] 故意拍一次没有深度的：在很暗的房间里拍，或用手指挡住机背的深度/ToF 传感器（若有）。等 10 秒后若仍无深度，录制时应出现黄色提示"未获取到深度，本次拍摄将不含深度（重建质量可能下降）"，logcat 有 `depth never became available` 警告。
+- [ ] 故意拍一次没有深度的：在很暗的房间里拍，或把手机完全静止不动（Pixel 10 Pro 没有 ToF，ARCore 深度来自运动立体，静止时不产出）。等 10 秒后若仍无深度，录制时应出现黄色提示"未获取到深度，本次拍摄将不含深度（重建质量可能下降）"，logcat 有 `depth never became available` 警告。
   上传重建后判断结果是否还能用（记"可用 / 勉强 / 不可用"）
 
 ### 6) 上传与重建流程
