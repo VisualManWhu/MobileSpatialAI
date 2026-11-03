@@ -148,6 +148,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offtrack-views", type=int, default=12, help="偏离轨迹渲染：拼图的视角数")
     ap.add_argument("--far-m", type=float, default=None, help="场景范围：距最近相机的最大距离（0 关闭）")
     ap.add_argument("--bbox-margin-m", type=float, default=None, help="场景范围：相机包围盒外扩距离（0 关闭）")
+    ap.add_argument("--contrib-min-views", type=int, default=None, help="贡献度剪枝：最少可见视角数（与 --contrib-min-px 都为 0 时关闭）")
+    ap.add_argument("--contrib-min-px", type=float, default=None, help="贡献度剪枝：最小贡献像素数（与 --contrib-min-views 都为 0 时关闭）")
+    ap.add_argument("--sor-sigma", type=float, default=None, help="离群点滤波：均值外的标准差倍数（0 关闭）")
+    ap.add_argument("--dump-pruned", action="store_true", help="把贡献度剪枝和离群点滤波移除的高斯写入 pruned.ply（需 --train）")
     args = ap.parse_args(argv)
 
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s: %(message)s")
@@ -160,18 +164,28 @@ def main(argv: list[str] | None = None) -> int:
             ("depth_lambda", args.depth_lambda),
             ("far_m", args.far_m),
             ("bbox_margin_m", args.bbox_margin_m),
+            ("contrib_min_views", args.contrib_min_views),
+            ("contrib_min_px", args.contrib_min_px),
+            ("sor_sigma", args.sor_sigma),
         )
         if v is not None
     }
-    if overrides and not args.train:
-        ap.error("--pose-lr / --depth-lambda / --far-m / --bbox-margin-m 只能和 --train 一起用")
+    if (overrides or args.dump_pruned) and not args.train:
+        ap.error(
+            "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --contrib-min-views / --contrib-min-px"
+            " / --sor-sigma / --dump-pruned 只能和 --train 一起用"
+        )
     profile = dataclasses.replace(profile, **overrides)
 
     train_s = None
     if args.train:
         out_dir = job_dir / f"retrain-{args.tag or 'new'}"
         print(f"重训到 {out_dir}（depth_lambda={profile.depth_lambda}, pose_lr={profile.pose_lr}）", flush=True)
+        if args.dump_pruned:
+            os.environ["RECON3D_DUMP_PRUNED"] = "1"
         train_s = _train(job_dir, out_dir, profile)
+        if args.dump_pruned and (out_dir / "pruned.ply").exists():
+            print(f"被剪高斯已写入 {out_dir / 'pruned.ply'}", flush=True)
     else:
         out_dir = job_dir / f"retrain-{args.tag}" if args.tag else job_dir
     ply = out_dir / "scene.ply"

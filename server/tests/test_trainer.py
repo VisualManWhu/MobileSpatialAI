@@ -1,5 +1,6 @@
 import dataclasses
 import logging
+import re
 
 import pytest
 import torch
@@ -64,7 +65,9 @@ def test_densification_growth_is_capped(synthetic_ts):
     )
     n_init = len(init_points(ts)[0])
     cap = n_init + 200
-    p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=cap)
+    # Floater pruning shrinks the set below n_init; off here so only growth vs. the cap is measured.
+    p = dataclasses.replace(PROFILES["laptop"], iterations=1000, max_gaussians=cap,
+                            contrib_min_views=0, contrib_min_px=0.0, sor_sigma=0.0)
     n = train(ts, p, on_progress=lambda p: None).means.shape[0]
     assert n_init < n <= cap
 
@@ -384,3 +387,48 @@ def test_reports_progress_every_100_steps(synthetic_ts):
     splats = train(synthetic_ts[0], p, on_progress=seen.append)
     assert seen == pytest.approx([1 / 3, 2 / 3, 1.0])
     assert splats.shN.shape[1] == 0
+
+
+_CONTRIB_RE = re.compile(r"贡献度剪枝（步 (\d+)）：移除 (\d+) 个高斯")
+_SOR_RE = re.compile(r"离群点滤波（k=8，[\d.]+σ）：移除 (\d+) 个高斯")
+
+
+@pytest.mark.gpu
+def test_training_prunes_by_contribution_and_logs(synthetic_ts, caplog, tmp_path):
+    ts = synthetic_ts[0]
+    p = dataclasses.replace(PROFILES["laptop"], iterations=400, max_gaussians=20000)
+    with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
+        splats = train(ts, p, on_progress=lambda p: None, pruned_out=tmp_path / "pruned.ply")
+    msgs = [r.getMessage() for r in caplog.records]
+    contrib = [m for msg in msgs if (m := _CONTRIB_RE.search(msg))]
+    sor = [m for msg in msgs if (m := _SOR_RE.search(msg))]
+    # steps iters//2, 3*iters//4 and once after the loop
+    assert [int(m.group(1)) for m in contrib] == [200, 300, 400]
+    assert len(sor) == 1
+    assert splats.means.shape[0] > 0
+    removed = sum(int(m.group(2)) for m in contrib) + int(sor[0].group(1))
+    assert (tmp_path / "pruned.ply").exists() == (removed > 0)
+    if removed > 0:
+        from recon3d.recon.export_splat import load_ply
+
+        assert load_ply(tmp_path / "pruned.ply").means.shape[0] == removed
+
+
+@pytest.mark.gpu
+def test_contribution_prune_never_empties(synthetic_ts):
+    ts = synthetic_ts[0]
+    p = dataclasses.replace(PROFILES["laptop"], iterations=400, max_gaussians=20000, contrib_min_views=10_000)
+    assert train(ts, p, on_progress=lambda p: None).means.shape[0] > 0
+
+
+@pytest.mark.gpu
+def test_pruning_off_matches_old_behaviour(synthetic_ts, caplog, tmp_path):
+    ts = synthetic_ts[0]
+    p = dataclasses.replace(PROFILES["laptop"], iterations=300, max_gaussians=20000,
+                            contrib_min_views=0, contrib_min_px=0.0, sor_sigma=0.0)
+    with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
+        n = train(ts, p, on_progress=lambda p: None, pruned_out=tmp_path / "pruned.ply").means.shape[0]
+    assert n > 0
+    msgs = [r.getMessage() for r in caplog.records]
+    assert not any("贡献度剪枝" in m or "离群点滤波" in m for m in msgs)
+    assert not (tmp_path / "pruned.ply").exists()

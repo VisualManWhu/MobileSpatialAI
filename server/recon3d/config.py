@@ -24,6 +24,14 @@ class Profile:
     # densification step and once more at the end of training.
     far_m: float = 5.0
     bbox_margin_m: float = 5.0
+    # Floater pruning (recon/contrib.py, recon/outliers.py). Contribution pruning renders every training
+    # view at half resolution and removes Gaussians visible (> contrib_min_px blended pixels) in fewer than
+    # contrib_min_views views or whose total contribution is below contrib_min_px; it runs at iterations // 2,
+    # 3 * iterations // 4 and once after training (both thresholds 0 disables it). The kNN statistical
+    # outlier filter (k = 8) then removes isolated Gaussian centres beyond mean + sor_sigma * std (0 disables).
+    contrib_min_views: int = 3
+    contrib_min_px: float = 0.5
+    sor_sigma: float = 3.0
 
 
 PROFILES: dict[str, Profile] = {

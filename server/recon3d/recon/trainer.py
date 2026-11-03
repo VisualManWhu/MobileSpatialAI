@@ -10,6 +10,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from pathlib import Path
 
 import numpy as np
 import torch
@@ -278,13 +279,66 @@ def _cull_outside(params, optimizers, state, bounds: SceneBounds | None) -> int:
     return n_out
 
 
+def _slice(params, mask: torch.Tensor) -> Splats:
+    """The masked Gaussians as a detached Splats (on the params' device)."""
+    return Splats(**{k: params[k][mask].detach().clone() for k in Splats.__dataclass_fields__})
+
+
+def _cat_splats(parts: list[Splats]) -> Splats:
+    return Splats(**{k: torch.cat([getattr(p, k) for p in parts]) for k in Splats.__dataclass_fields__})
+
+
+@torch.no_grad()
+def _prune_contrib(
+    params, optimizers, state, viewmats, Ks, W: int, H: int, profile: Profile
+) -> tuple[int, Splats | None]:
+    """Remove Gaussians seen in too few views or contributing too little (recon/contrib.py).
+
+    Returns (n_removed, removed Gaussians or None). Never empties the set.
+    """
+    from gsplat.strategy.ops import remove
+
+    from recon3d.recon.contrib import compute_contrib, prune_mask
+
+    total, nviews = compute_contrib(params, viewmats, Ks, W, H, downscale=2, min_px=profile.contrib_min_px)
+    mask = prune_mask(total, nviews, profile.contrib_min_views, profile.contrib_min_px)
+    n = int(mask.sum())
+    if n == 0 or n == len(mask):
+        return 0, None
+    removed = _slice(params, mask)
+    remove(params=params, optimizers=optimizers, state=state, mask=mask)
+    return n, removed
+
+
+@torch.no_grad()
+def _prune_sor(params, optimizers, state, sigma: float) -> tuple[int, Splats | None]:
+    """Remove statistical outliers among the Gaussian centres (k = 8). Never empties the set."""
+    from gsplat.strategy.ops import remove
+
+    from recon3d.recon.outliers import sor_mask
+
+    out = sor_mask(params["means"].detach().cpu().numpy(), k=8, sigma=sigma)
+    n = int(out.sum())
+    if n == 0 or n == len(out):
+        return 0, None
+    mask = torch.from_numpy(out).to(params["means"].device)
+    removed = _slice(params, mask)
+    remove(params=params, optimizers=optimizers, state=state, mask=mask)
+    return n, removed
+
+
 def train(
     ts: TrainingSet,
     profile: Profile,
     on_progress: Callable[[float], None],
     device: str = "cuda",
+    pruned_out: Path | None = None,
 ) -> Splats:
-    """Optimize Gaussians on ts. Calls on_progress(i/iterations) every 100 steps (and at the end)."""
+    """Optimize Gaussians on ts. Calls on_progress(i/iterations) every 100 steps (and at the end).
+
+    With pruned_out, every Gaussian removed by contribution pruning or the outlier filter
+    (not bounds culling) is written there as a PLY once training ends (nothing written if none).
+    """
     from gsplat import DefaultStrategy
     from gsplat.strategy import ops
 
@@ -299,6 +353,18 @@ def train(
     scene_scale = _scene_scale(ts.c2w.to(device))
     bounds = SceneBounds.from_c2w(ts.c2w, profile.far_m, profile.bbox_margin_m)
     culled = 0
+    use_contrib = profile.contrib_min_views > 0 or profile.contrib_min_px > 0
+    contrib_steps = {iters // 2, 3 * iters // 4} if use_contrib else set()
+    pruned: list[Splats] = []
+
+    def _contrib(at_step: int) -> None:
+        n, removed = _prune_contrib(params, optimizers, state, viewmats, Ks, W, H, profile)
+        if removed is not None and pruned_out is not None:
+            pruned.append(removed)
+        log.info(
+            "贡献度剪枝（步 %d）：移除 %d 个高斯（<%d 个视角可见或贡献<%.1f px），剩余 %d",
+            at_step, n, profile.contrib_min_views, profile.contrib_min_px, len(params["means"]),
+        )
 
     params = _init_params(ts, profile, device, bounds)
     lrs = {
@@ -413,6 +479,8 @@ def train(
         # Floaters that densified or drifted out of the room go at the strategy's cadence.
         if step > 0 and step % strategy.refine_every == 0:
             culled += _cull_outside(params, optimizers, state, bounds)
+        if step in contrib_steps:
+            _contrib(step)
         _enforce_cap(params, optimizers, state, profile.max_gaussians)
         # gsplat 1.5.3 never resets opacity (`step % reset_every == 0 & step > 0` is
         # always False by operator precedence), so do the strategy's reset here.
@@ -426,7 +494,19 @@ def train(
             "深度约束用于 %d/%d 个有深度的帧（其中 %d 帧按深度自身位姿单独渲染）",
             sum(depth_used), sum(has_depth), n_depth_view,
         )
+    if use_contrib:
+        _contrib(iters)
     culled += _cull_outside(params, optimizers, state, bounds)
+    if profile.sor_sigma > 0:
+        n, removed = _prune_sor(params, optimizers, state, profile.sor_sigma)
+        if removed is not None and pruned_out is not None:
+            pruned.append(removed)
+        log.info("离群点滤波（k=8，%.1fσ）：移除 %d 个高斯，剩余 %d", profile.sor_sigma, n, len(params["means"]))
+    if pruned_out is not None and pruned:
+        from recon3d.recon.export_splat import export_ply
+
+        export_ply(_cat_splats(pruned), pruned_out)
+        log.info("被剪高斯已写入 %s（%d 个）", pruned_out, sum(len(p.means) for p in pruned))
     if bounds.enabled:
         log.info(
             "场景范围裁剪（距最近相机 ≤ %.1f m，相机包围盒外扩 %.1f m）：训练中共移除 %d 个高斯，剩余 %d",

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import os
 import shutil
 import sys
 import traceback
@@ -39,7 +40,9 @@ def _run(job_dir: Path, workdir: Path, profile: Profile, on_progress: Callable[[
     cap = load_capture(job_dir / "capture.zip", workdir)
     ts = build_training_set(cap, profile)
     del cap
-    splats = train(ts, profile, lambda p: on_progress(TRAIN_SHARE * p))
+    # Debug dump of the floater-pruned Gaussians (scripts/eval_scene.py --dump-pruned).
+    extra = {"pruned_out": job_dir / "pruned.ply"} if os.environ.get("RECON3D_DUMP_PRUNED") == "1" else {}
+    splats = train(ts, profile, lambda p: on_progress(TRAIN_SHARE * p), **extra)
     del ts
     on_progress(TRAIN_SHARE)
     export_splat(splats, job_dir / "scene.splat")
