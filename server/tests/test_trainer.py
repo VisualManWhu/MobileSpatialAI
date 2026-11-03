@@ -9,7 +9,7 @@ pytest.importorskip("gsplat")
 
 from recon3d.config import PROFILES  # noqa: E402
 from recon3d.recon.init_points import init_points  # noqa: E402
-from recon3d.recon.trainer import Splats, _enforce_cap, render, train  # noqa: E402
+from recon3d.recon.trainer import Splats, _enforce_cap, reg_loss, render, train  # noqa: E402
 from tests.fixtures.synthetic import make_synthetic_scene  # noqa: E402
 
 
@@ -46,6 +46,13 @@ def test_trains_synthetic_scene(synthetic_ts):
     assert splats.opacities.shape == (n,)
     assert splats.sh0.shape == (n, 1, 3) and splats.shN.shape == (n, K, 3)
     assert psnr(render(splats, test_ts), test_ts.images) > 25.0
+
+
+@pytest.mark.gpu
+def test_reg_loss_values():
+    params = {"opacities": torch.zeros(4, device="cuda"), "scales": torch.zeros(4, 3, device="cuda")}
+    assert torch.isclose(reg_loss(params, 0.01, 0.01), torch.tensor(0.01 * 0.5 + 0.01 * 1.0, device="cuda"))
+    assert reg_loss(params, 0.0, 0.0).item() == 0.0
 
 
 @pytest.mark.gpu

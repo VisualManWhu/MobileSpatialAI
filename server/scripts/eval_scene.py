@@ -151,6 +151,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--contrib-min-views", type=int, default=None, help="贡献度剪枝：最少可见视角数（与 --contrib-min-px 都为 0 时关闭）")
     ap.add_argument("--contrib-min-px", type=float, default=None, help="贡献度剪枝：最小贡献像素数（与 --contrib-min-views 都为 0 时关闭）")
     ap.add_argument("--sor-sigma", type=float, default=None, help="离群点滤波：均值外的标准差倍数（0 关闭）")
+    ap.add_argument("--opacity-reg", type=float, default=None, help="不透明度正则权重（0 关闭）")
+    ap.add_argument("--scale-reg", type=float, default=None, help="尺度正则权重（0 关闭）")
     ap.add_argument("--dump-pruned", action="store_true", help="把贡献度剪枝和离群点滤波移除的高斯写入 pruned.ply（需 --train）")
     args = ap.parse_args(argv)
 
@@ -167,13 +169,15 @@ def main(argv: list[str] | None = None) -> int:
             ("contrib_min_views", args.contrib_min_views),
             ("contrib_min_px", args.contrib_min_px),
             ("sor_sigma", args.sor_sigma),
+            ("opacity_reg", args.opacity_reg),
+            ("scale_reg", args.scale_reg),
         )
         if v is not None
     }
     if (overrides or args.dump_pruned) and not args.train:
         ap.error(
             "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --contrib-min-views / --contrib-min-px"
-            " / --sor-sigma / --dump-pruned 只能和 --train 一起用"
+            " / --sor-sigma / --opacity-reg / --scale-reg / --dump-pruned 只能和 --train 一起用"
         )
     profile = dataclasses.replace(profile, **overrides)
 

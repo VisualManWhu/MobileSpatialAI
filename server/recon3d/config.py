@@ -32,6 +32,11 @@ class Profile:
     contrib_min_views: int = 3
     contrib_min_px: float = 0.5
     sor_sigma: float = 3.0
+    # Regularisers added to the loss every step (trainer.reg_loss): opacity_reg * mean(opacity) pushes
+    # unneeded Gaussians towards transparency so they get pruned; scale_reg * mean(scale) discourages
+    # huge blobs. 0 disables each.
+    opacity_reg: float = 0.01
+    scale_reg: float = 0.01
 
 
 PROFILES: dict[str, Profile] = {

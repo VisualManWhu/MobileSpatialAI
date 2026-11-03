@@ -188,6 +188,16 @@ def _depth_loss_usable(ts: TrainingSet, i: int, H: int, W: int) -> bool:
     )
 
 
+def reg_loss(params, opacity_reg: float, scale_reg: float) -> torch.Tensor:
+    """Opacity and scale regularisers: opacity_reg * mean(sigmoid(opacity logits)) + scale_reg * mean(exp(log scales))."""
+    total = torch.zeros((), device=params["opacities"].device)
+    if opacity_reg:
+        total = total + opacity_reg * torch.sigmoid(params["opacities"]).mean()
+    if scale_reg:
+        total = total + scale_reg * torch.exp(params["scales"]).mean()
+    return total
+
+
 def _log_pose_stats(pose: PoseRefine | None) -> None:
     if pose is None:
         return
@@ -464,6 +474,8 @@ def train(
                 _warn_skip(i, "没有可用的深度像素（置信度全为 0）")
         if pose is not None:
             loss = loss + POSE_REG * pose.reg()
+        if profile.opacity_reg or profile.scale_reg:
+            loss = loss + reg_loss(params, profile.opacity_reg, profile.scale_reg)
         loss.backward()
         if pose_opt is not None:
             pose_opt.step()
