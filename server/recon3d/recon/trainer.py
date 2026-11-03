@@ -300,7 +300,7 @@ def _prune_contrib(
 
     from recon3d.recon.contrib import compute_contrib, prune_mask
 
-    total, nviews = compute_contrib(params, viewmats, Ks, W, H, downscale=2, min_px=profile.contrib_min_px)
+    total, nviews = compute_contrib(params, viewmats, Ks, W, H, downscale=2)
     mask = prune_mask(total, nviews, profile.contrib_min_views, profile.contrib_min_px)
     n = int(mask.sum())
     if n == 0 or n == len(mask):
@@ -358,6 +358,7 @@ def train(
     pruned: list[Splats] = []
 
     def _contrib(at_step: int) -> None:
+        # Renders use the uncorrected viewmats (PoseRefine deltas ignored; pose_lr is 0 by default).
         n, removed = _prune_contrib(params, optimizers, state, viewmats, Ks, W, H, profile)
         if removed is not None and pruned_out is not None:
             pruned.append(removed)
