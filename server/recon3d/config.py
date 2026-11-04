@@ -68,6 +68,18 @@ class Profile:
     # colours stay those of an average frame.
     appearance_lr: float = 0.0
     appearance_reg: float = 1e-2
+    # Monocular depth prior (recon/mono_depth.py), opt-in (mono_lambda = 0 turns it off): Depth Anything V2
+    # Small is run once on every frame before training, and every step adds w * (1 - Pearson(1 / rendered
+    # depth, predicted disparity)) over mono_patch x mono_patch tiles of pixels with rendered alpha > 0.5,
+    # with w decaying linearly from mono_lambda to mono_lambda_end over training. ARCore depth stays in the
+    # initial cloud only (where it is proven useful); the network is steadiest on the textureless walls
+    # and floors where motion stereo has nothing to triangulate. Evidence (docs/acceptance/phase1.md section
+    # 5, conclusion 9): opaque Gaussians > 0.3 m from the depth cloud indoor 5.7k -> 4.1k, outdoor 15.2k ->
+    # 10.5k (near-camera band 27% -> 13%), off-trajectory renders visibly cleaner outdoors; PSNR -0.36 /
+    # -0.03 dB; +9 s inference and ~+20% training time (the depth render every step).
+    mono_lambda: float = 0.1
+    mono_lambda_end: float = 0.01
+    mono_patch: int = 64
 
 
 PROFILES: dict[str, Profile] = {

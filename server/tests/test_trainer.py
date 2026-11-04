@@ -517,6 +517,31 @@ def test_profile_defaults_mcmc_without_pruning():
         assert p.far_m == 5.0 and p.bbox_margin_m == 5.0 and p.contrib_view_px == 1.0
         assert p.support_far_m == 2.0 and p.support_dist_m == 0.3
         assert p.appearance_lr == 0.0 and p.appearance_reg == 1e-2
+        assert p.mono_lambda == 0.1 and p.mono_lambda_end == 0.01 and p.mono_patch == 64
+
+
+@pytest.mark.gpu
+def test_trains_with_mono_depth_prior(synthetic_ts, caplog, monkeypatch):
+    import recon3d.recon.trainer as tr
+
+    # Stand-in for Depth Anything: the synthetic scene's own inverse depth is unavailable here, so use a
+    # smooth map; the test checks the wiring (inference once, loss every step, log line), not the prior.
+    calls = []
+
+    def fake_predict(images, device):
+        calls.append(tuple(images.shape))
+        n, H, W = images.shape[:3]
+        return torch.linspace(1, 2, H)[None, :, None].expand(n, H, W).to(torch.float16).contiguous()
+
+    monkeypatch.setattr(tr, "predict_disparity", fake_predict)
+    p = dataclasses.replace(PROFILES["laptop"], iterations=300, mono_lambda=0.1, mono_patch=16)
+    with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
+        splats = train(synthetic_ts[0], p, on_progress=lambda p: None)
+    assert splats.means.shape[0] > 0
+    assert len(calls) == 1 and calls[0][0] == synthetic_ts[0].images.shape[0]
+    msgs = [r.getMessage() for r in caplog.records if "单目深度约束" in r.getMessage()]
+    assert len(msgs) == 1 and "/300 步" in msgs[0]
+    assert not msgs[0].startswith("单目深度约束：0/")
 
 
 @pytest.mark.gpu

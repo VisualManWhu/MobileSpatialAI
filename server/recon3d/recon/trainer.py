@@ -20,6 +20,7 @@ from recon3d.config import Profile
 from recon3d.recon.bounds import SceneBounds
 from recon3d.recon.dataset import TrainingSet
 from recon3d.recon.init_points import init_points
+from recon3d.recon.mono_depth import pearson_patch_loss, predict_disparity
 from recon3d.recon.appearance import AffineColor
 from recon3d.recon.pose_opt import PoseRefine
 
@@ -429,6 +430,8 @@ def train(
             only_views, only_total, both,
         )
 
+    # Monocular disparity for every frame (CPU, float16), predicted before the Gaussians take the GPU.
+    mono = predict_disparity(images, device) if profile.mono_lambda > 0 else None
     params = _init_params(ts, profile, device, bounds, cloud)
     lrs = {
         "means": 1.6e-4 * scene_scale,
@@ -498,6 +501,7 @@ def train(
             depth_Ks[i] = _depth_K(ts, i, H, W).to(device)[None]
     n_depth_view = sum(v is not None for v in depth_vms)
     depth_used = [False] * n_img
+    mono_used = 0
     warned_skip = False
 
     def _warn_skip(i: int, reason: str) -> None:
@@ -522,8 +526,9 @@ def train(
         idx = torch.tensor([i], device=device)
         if pose is not None:
             vm = pose(vm, idx)
-        render_mode = "RGB+ED" if depth_ok[i] and depth_vms[i] is None else "RGB"
-        out, _, info = _rasterize(params, vm, Ks[i : i + 1], W, H, sh_deg, render_mode)
+        need_ed = mono is not None or (depth_ok[i] and depth_vms[i] is None)
+        render_mode = "RGB+ED" if need_ed else "RGB"
+        out, alphas, info = _rasterize(params, vm, Ks[i : i + 1], W, H, sh_deg, render_mode)
         img = out[..., :3]
         if color is not None:
             img = color(img, idx)
@@ -552,6 +557,12 @@ def train(
             loss = loss + POSE_REG * pose.reg()
         if color is not None and profile.appearance_reg:
             loss = loss + profile.appearance_reg * color.reg()
+        if mono is not None:
+            ml = pearson_patch_loss(out[0, ..., 3], mono[i].to(device), alphas[0, ..., 0] > 0.5, profile.mono_patch)
+            if ml is not None:
+                w = profile.mono_lambda + (profile.mono_lambda_end - profile.mono_lambda) * step / max(1, iters - 1)
+                loss = loss + w * ml
+                mono_used += 1
         if profile.opacity_reg or profile.scale_reg:
             loss = loss + reg_loss(params, profile.opacity_reg, profile.scale_reg)
         loss.backward()
@@ -593,6 +604,8 @@ def train(
             "深度约束用于 %d/%d 个有深度的帧（其中 %d 帧按深度自身位姿单独渲染）",
             sum(depth_used), sum(has_depth), n_depth_view,
         )
+    if mono is not None:
+        log.info("单目深度约束：%d/%d 步有可用图块（权重 %.3f → %.3f，%d px 图块）", mono_used, iters, profile.mono_lambda, profile.mono_lambda_end, profile.mono_patch)
     if use_contrib:
         _contrib(iters)
     culled += _cull_outside(params, optimizers, rm_state, bounds)
