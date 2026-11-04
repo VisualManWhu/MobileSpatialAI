@@ -4,7 +4,7 @@ Usage (Ubuntu, from server/):
   uv run python scripts/eval_scene.py <job_dir> [--profile laptop]
       evaluates <job_dir>/scene.ply (or <job_dir>/retrain-<tag>/scene.ply with --tag)
   uv run python scripts/eval_scene.py <job_dir> --train [--tag NAME] [--pose-lr X] [--depth-lambda Y]
-                                                         [--far-m R] [--bbox-margin-m M]
+                                                         [--far-m R] [--bbox-margin-m M] [--support-far-m S] [--support-dist-m D]
       retrains capture.zip into <job_dir>/retrain-<tag>/ (default tag "new") with the job
       pipeline, then evaluates the new scene.ply
 
@@ -38,7 +38,7 @@ FLOATER_DIST_M = 0.10
 WORST_K = 5
 # Profile fields recorded in eval.json; only known (and reported) when this run trained the ply.
 TRAIN_SETTINGS = (
-    "depth_lambda", "pose_lr", "strategy", "far_m", "bbox_margin_m", "contrib_min_views",
+    "depth_lambda", "pose_lr", "strategy", "far_m", "bbox_margin_m", "support_far_m", "support_dist_m", "contrib_min_views",
     "contrib_min_px", "contrib_view_px", "sor_sigma", "opacity_reg", "scale_reg",
 )
 
@@ -132,6 +132,8 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack
         "strategy": profile.strategy,
         "far_m": profile.far_m,
         "bbox_margin_m": profile.bbox_margin_m,
+        "support_far_m": profile.support_far_m,
+        "support_dist_m": profile.support_dist_m,
         "contrib_min_views": profile.contrib_min_views,
         "contrib_min_px": profile.contrib_min_px,
         "contrib_view_px": profile.contrib_view_px,
@@ -162,6 +164,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--offtrack-views", type=int, default=12, help="偏离轨迹渲染：拼图的视角数")
     ap.add_argument("--far-m", type=float, default=None, help="场景范围：距最近相机的最大距离（0 关闭）")
     ap.add_argument("--bbox-margin-m", type=float, default=None, help="场景范围：相机包围盒外扩距离（0 关闭）")
+    ap.add_argument("--support-far-m", type=float, default=None, help="点云支持裁剪：距相机超过此距离的高斯需贴近深度点云（0 关闭）")
+    ap.add_argument("--support-dist-m", type=float, default=None, help="点云支持裁剪：到深度点云的最大距离（0 关闭）")
     ap.add_argument("--contrib-min-views", type=int, default=None, help="贡献度剪枝：最少可见视角数（与 --contrib-min-px 都为 0 时关闭）")
     ap.add_argument("--contrib-min-px", type=float, default=None, help="贡献度剪枝：最小贡献像素数（与 --contrib-min-views 都为 0 时关闭）")
     ap.add_argument("--contrib-view-px", type=float, default=None, help="贡献度剪枝：单个视角算作可见的最小混合像素数（半分辨率）")
@@ -182,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
             ("depth_lambda", args.depth_lambda),
             ("far_m", args.far_m),
             ("bbox_margin_m", args.bbox_margin_m),
+            ("support_far_m", args.support_far_m),
+            ("support_dist_m", args.support_dist_m),
             ("contrib_min_views", args.contrib_min_views),
             ("contrib_min_px", args.contrib_min_px),
             ("contrib_view_px", args.contrib_view_px),
@@ -194,7 +200,7 @@ def main(argv: list[str] | None = None) -> int:
     }
     if (overrides or args.dump_pruned) and not args.train:
         ap.error(
-            "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --contrib-min-views / --contrib-min-px"
+            "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --support-far-m / --support-dist-m / --contrib-min-views / --contrib-min-px"
             " / --contrib-view-px / --sor-sigma / --opacity-reg / --scale-reg / --strategy / --dump-pruned 只能和 --train 一起用"
         )
     profile = dataclasses.replace(profile, **overrides)

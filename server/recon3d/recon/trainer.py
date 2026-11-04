@@ -227,9 +227,14 @@ def _scene_scale(c2w: torch.Tensor) -> float:
 
 
 def _init_params(
-    ts: TrainingSet, profile: Profile, device: str, bounds: SceneBounds | None = None
+    ts: TrainingSet,
+    profile: Profile,
+    device: str,
+    bounds: SceneBounds | None = None,
+    cloud: tuple[np.ndarray, np.ndarray] | None = None,
 ) -> torch.nn.ParameterDict:
-    xyz, rgb = init_points(ts)
+    """cloud: (xyz, rgb) from init_points(ts), when the caller already computed it (for the bounds)."""
+    xyz, rgb = cloud if cloud is not None else init_points(ts)
     if bounds is not None and bounds.enabled:
         keep = bounds.keep_np(xyz)
         if 0 < keep.sum() < len(xyz):
@@ -389,7 +394,12 @@ def train(
     Ks = ts.K.to(device)
     n_img, H, W = images.shape[:3]
     scene_scale = _scene_scale(ts.c2w.to(device))
-    bounds = SceneBounds.from_c2w(ts.c2w, profile.far_m, profile.bbox_margin_m)
+    # The depth init cloud doubles as the support set for the bounds (see recon/bounds.py).
+    cloud = init_points(ts)
+    bounds = SceneBounds.from_c2w(
+        ts.c2w, profile.far_m, profile.bbox_margin_m,
+        support_xyz=cloud[0], support_far_m=profile.support_far_m, support_dist_m=profile.support_dist_m,
+    )
     culled = 0
     use_contrib = profile.contrib_min_views > 0 or profile.contrib_min_px > 0
     contrib_steps = {iters // 2, 3 * iters // 4} if use_contrib else set()
@@ -418,7 +428,7 @@ def train(
             only_views, only_total, both,
         )
 
-    params = _init_params(ts, profile, device, bounds)
+    params = _init_params(ts, profile, device, bounds, cloud)
     lrs = {
         "means": 1.6e-4 * scene_scale,
         "scales": 5e-3,
@@ -584,8 +594,10 @@ def train(
         log.info("被剪高斯已写入 %s（%d 个）", pruned_out, sum(len(p.means) for p in pruned))
     if bounds.enabled:
         log.info(
-            "场景范围裁剪（距最近相机 ≤ %.1f m，相机包围盒外扩 %.1f m）：训练中共移除 %d 个高斯，剩余 %d",
-            profile.far_m, profile.bbox_margin_m, culled, len(params["means"]),
+            "场景范围裁剪（距最近相机 ≤ %.1f m，相机包围盒外扩 %.1f m，距相机 > %.1f m 处需距深度点云 ≤ %.2f m）"
+            "：训练中共移除 %d 个高斯，剩余 %d",
+            profile.far_m, profile.bbox_margin_m, bounds.support_far_m, bounds.support_dist_m,
+            culled, len(params["means"]),
         )
     log.info("训练耗时 %.1f s（%d 步）", time.monotonic() - t_start, iters)
     _log_pose_stats(pose)

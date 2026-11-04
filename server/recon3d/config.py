@@ -24,6 +24,14 @@ class Profile:
     # densification step and once more at the end of training.
     far_m: float = 5.0
     bbox_margin_m: float = 5.0
+    # Depth-cloud support (recon/bounds.py): a Gaussian farther than support_far_m from every camera must lie
+    # within support_dist_m of a point of the confidence-filtered depth init cloud, or it goes. Far from the
+    # cameras that cloud is the only evidence of geometry; on the far_m = 5 -> 3 experiment the floaters
+    # just moved into the 2-3 m band (docs/acceptance/phase1.md section 5), so a hard radius cannot fix
+    # them. Applied with the other bounds criteria. 0 in either value disables it. The lookup is a voxel
+    # hash with cell = support_dist_m, so up to 2 * sqrt(3) * support_dist_m counts as supported.
+    support_far_m: float = 2.0
+    support_dist_m: float = 0.3
     # Floater pruning (recon/contrib.py, recon/outliers.py), opt-in (0 = off). Contribution pruning renders
     # every training view at half resolution and removes Gaussians visible (> contrib_view_px blended pixels
     # at half resolution) in fewer than contrib_min_views views, or whose total contribution is below

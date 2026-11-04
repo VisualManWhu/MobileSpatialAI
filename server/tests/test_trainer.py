@@ -515,6 +515,7 @@ def test_profile_defaults_mcmc_without_pruning():
         assert p.contrib_min_views == 0 and p.contrib_min_px == 0.0 and p.sor_sigma == 0.0
         assert p.opacity_reg == 0.01 and p.scale_reg == 0.01
         assert p.far_m == 5.0 and p.bbox_margin_m == 5.0 and p.contrib_view_px == 1.0
+        assert p.support_far_m == 2.0 and p.support_dist_m == 0.3
 
 
 def test_contrib_pass_skipped_soon_after_opacity_reset():
