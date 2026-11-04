@@ -1,10 +1,12 @@
 // Recon3D on-device 3DGS viewer: three.js + Spark, bundled into the APK (no CDN, no network).
 //
-// Page URL: index.html?scene=/scene/scene.splat (served by the app's WebViewAssetLoader).
+// Page URL: index.html?scene=/scene/scene.splat[&home=x,y,z[&look=dx,dy,dz]]
+// (served by the app's WebViewAssetLoader). `home` is the capture trajectory's centre and `look`
+// the first frame's view direction, both in the scene world frame; see homeView().
 // Calls back into the app via the `Android` JavascriptInterface: onLoaded(count) / onError(msgZh).
 //
 // JS API on window (used by 第二期):
-//   loadScene(url)                      -> Promise<number>  (gaussian count)
+//   loadScene(url, homeHint?)           -> Promise<number>  (gaussian count)
 //   flyTo({x,y,z}, {x,y,z} lookAt, ms)  -> Promise<void>    (smooth ease-in-out)
 //   setCameraHome()
 // Coordinates are the scene WORLD frame (same as .splat positions). That frame is ARCore's
@@ -17,6 +19,7 @@ import {
   splatCount,
   robustBounds,
   homeView,
+  parseHomeHint,
   easeInOutCubic,
   lerp,
   worldToThree,
@@ -153,8 +156,11 @@ function setCameraHome() {
   requestRender();
 }
 
-/** Fetches and shows a .splat; resolves to the gaussian count. Replaces any previous scene. */
-async function loadScene(url) {
+/**
+ * Fetches and shows a .splat; resolves to the gaussian count. Replaces any previous scene.
+ * homeHint: optional { position, look } for the home camera (see homeView()).
+ */
+async function loadScene(url, homeHint = null) {
   if (!renderer) throw new Error("viewer not initialised");
   const res = await fetch(url);
   if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
@@ -177,7 +183,7 @@ async function loadScene(url) {
   mesh = next;
   scene.add(mesh);
 
-  home = homeView(bounds, FOV, camera.aspect);
+  home = homeView(bounds, FOV, camera.aspect, homeHint);
   setCameraHome();
   return count;
 }
@@ -195,11 +201,12 @@ function report(kind, arg) {
 }
 
 async function boot() {
-  const url = new URLSearchParams(window.location.search).get("scene");
+  const params = new URLSearchParams(window.location.search);
+  const url = params.get("scene");
   try {
     if (!url) throw new Error("missing ?scene=");
     init();
-    const count = await loadScene(url);
+    const count = await loadScene(url, parseHomeHint(params));
     report("loaded", count);
   } catch (err) {
     console.error("scene load failed", err);

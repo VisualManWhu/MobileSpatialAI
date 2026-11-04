@@ -1,5 +1,6 @@
 package dev.recon3d.rooms
 
+import dev.recon3d.viewer.HomeView
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -30,6 +31,14 @@ class RoomRepositoryTest {
         assertEquals("queued", reloaded.state)
         assertEquals("j1", reloaded.jobId)
         assertEquals("model", reloaded.kind)
+    }
+
+    @Test fun homeViewPersists() {
+        val room = repo.createRoom("客厅")
+        repo.addCapture(room.id, CaptureRecord(id = "cap-1", zipPath = "/x/cap-1.zip"))
+        assertEquals(null, repo.capture(room.id, "cap-1").home)
+        repo.editCapture(room.id, "cap-1") { it.copy(home = HomeView(1f, 2f, 3f, 0f, 0f, -1f)) }
+        assertEquals(HomeView(1f, 2f, 3f, 0f, 0f, -1f), RoomRepository(dir).capture(room.id, "cap-1").home)
     }
 
     @Test fun removeCaptureDropsRecordAndPersists() {

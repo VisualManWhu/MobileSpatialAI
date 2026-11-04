@@ -5,6 +5,7 @@ import {
   splatCount,
   robustBounds,
   homeView,
+  parseHomeHint,
   fitView,
   insideBounds,
   withTimeout,
@@ -153,6 +154,47 @@ test("homeView: target depth is clamped to >= 0.5 m", () => {
 test("homeView: origin outside the (expanded) bounds -> bounds-fit view", () => {
   const far = { min: [5, 0, -10], max: [9, 3, -6] };
   assert.deepEqual(homeView(far, 60, 1), fitView(far, 60, 1));
+});
+
+test("homeView with a hint: camera at the trajectory centre, facing the look direction", () => {
+  const room = { min: [0, -1.5, -6], max: [4, 1, 0] }; // centre (2, -0.25, -3)
+  const hint = { position: { x: 1, y: 0.3, z: -1 }, look: { x: 3, y: -4, z: 0 } }; // +X, pitched down
+  const v = homeView(room, 60, 1, hint);
+  assert.deepEqual(v.position, { x: 1, y: 0.3, z: -1 });
+  // dir = (0.6, -0.8, 0); d = (1, -0.55, -2) . dir = 0.6 + 0.44 = 1.04 -> target = pos + 1.04 * dir
+  assert.ok(Math.abs(v.target.x - (1 + 0.624)) < 1e-9 && Math.abs(v.target.y - (0.3 - 0.832)) < 1e-9 && v.target.z === -1);
+  assert.ok(v.far >= Math.hypot(1, -0.55, -2) + Math.hypot(2, 1.25, 3));
+});
+
+test("homeView with a hint: missing or vertical look falls back to -Z; depth clamps to 0.5 m", () => {
+  const room = { min: [-2, -1, -2], max: [2, 1, 2] };
+  const noLook = homeView(room, 60, 1, { position: { x: 0, y: 0, z: 1 }, look: null });
+  assert.deepEqual(noLook.target, { x: 0, y: 0, z: 0 }); // centre is 1 m ahead along -Z
+  const down = homeView(room, 60, 1, { position: { x: 0, y: 0, z: -1.5 }, look: { x: 0, y: -1, z: 0 } });
+  assert.deepEqual(down.target, { x: 0, y: 0, z: -2 }); // centre is behind -> clamped 0.5 m
+});
+
+test("homeView trusts a hint outside the trimmed bounds (ground-only scene, phone above it)", () => {
+  const ground = { min: [-2, -1.4, -4], max: [2, -0.3, -1] };
+  const v = homeView(ground, 60, 1, { position: { x: 0, y: 0, z: -3 }, look: { x: 0, y: -0.36, z: -0.93 } });
+  assert.deepEqual(v.position, { x: 0, y: 0, z: -3 });
+  assert.ok(v.target.y < 0 && v.target.z < -3, "looks down and forward from the trajectory centre");
+});
+
+test("homeView without a hint is unchanged (origin, -Z)", () => {
+  const room = { min: [-2, -1.5, -4], max: [2, 1, 1] };
+  assert.deepEqual(homeView(room, 60, 0.5), homeView(room, 60, 0.5, null));
+});
+
+test("parseHomeHint reads home and look, ignores a bad look, rejects a bad home", () => {
+  const p = (q) => parseHomeHint(new URLSearchParams(q));
+  assert.deepEqual(p("scene=a&home=1,2.5,-3&look=0,0,-1"), { position: { x: 1, y: 2.5, z: -3 }, look: { x: 0, y: 0, z: -1 } });
+  assert.deepEqual(p("home=1,2,3"), { position: { x: 1, y: 2, z: 3 }, look: null });
+  assert.deepEqual(p("home=1,2,3&look=x,0,0"), { position: { x: 1, y: 2, z: 3 }, look: null });
+  assert.equal(p("scene=a"), null);
+  assert.equal(p("home=1,2"), null);
+  assert.equal(p("home=1,NaN,3"), null);
+  assert.equal(p("home=1,2,Infinity"), null);
 });
 
 test("withTimeout passes through results and rejections that settle in time", async () => {

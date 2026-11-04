@@ -62,25 +62,57 @@ export function insideBounds(p, bounds, margin = 0.1) {
   });
 }
 
+const ORIGIN = { x: 0, y: 0, z: 0 };
+const MINUS_Z = { x: 0, y: 0, z: -1 };
+
 /**
- * Home camera (the .splat carries no camera poses, so the first frame is approximated):
- *
- * ARCore's world origin IS the device pose when the session started, i.e. (almost exactly) the
- * first captured frame's camera position, and the device then looks roughly along -Z. So when the
- * origin lies inside the trimmed scene bounds (expanded 10%) — the normal "scanned from inside
- * the room" case — the home camera sits at (0,0,0) looking level toward -Z, with the orbit target
- * at (0,0,-d), d = the bounds centre's depth along -Z (at least 0.5 m).
- * Otherwise (origin outside the scene) falls back to fitView().
+ * Parses the page's home hint: `home=x,y,z` (camera position, scene world frame) and optionally
+ * `look=dx,dy,dz` (view direction). Returns { position, look } or null when `home` is absent or
+ * malformed; a malformed `look` is ignored (level -Z is used).
  */
-export function homeView(bounds, fovDeg, aspect) {
-  const origin = { x: 0, y: 0, z: 0 };
-  if (!insideBounds(origin, bounds, 0.1)) return fitView(bounds, fovDeg, aspect);
+export function parseHomeHint(params) {
+  const parse = (s) => {
+    if (typeof s !== "string") return null;
+    const v = s.split(",").map(Number);
+    return v.length === 3 && v.every(Number.isFinite) ? { x: v[0], y: v[1], z: v[2] } : null;
+  };
+  const position = parse(params.get("home"));
+  if (!position) return null;
+  return { position, look: parse(params.get("look")) };
+}
+
+/** Unit vector along `look`; level -Z when `look` is missing or (nearly) vertical. */
+function viewDirection(look) {
+  if (!look) return MINUS_Z;
+  if (!(Math.hypot(look.x, look.z) > 1e-6)) return MINUS_Z;
+  const len = Math.hypot(look.x, look.y, look.z);
+  return { x: look.x / len, y: look.y / len, z: look.z / len };
+}
+
+/**
+ * Home camera. The .splat carries no camera poses, so the app passes a hint when it has one:
+ * the centre of the capture trajectory (mean camera position) and the first frame's view direction.
+ * The camera then stands there facing that way (the pitch is kept: a floor scan looks down, as the
+ * phone did); the orbit target is d metres ahead, d = the bounds centre's depth along that
+ * direction (at least 0.5 m). The hint is trusted even outside the trimmed bounds: a ground-only
+ * scene has nothing above the phone, so the trajectory itself lies outside the splat box.
+ *
+ * Without a hint the ARCore world origin stands in — it IS the device pose when the session
+ * started, i.e. (almost exactly) the first captured frame's camera position, looking roughly -Z —
+ * but only when it lies inside the trimmed scene bounds (expanded 10%), the normal "scanned from
+ * inside the room" case; otherwise (origin outside the scene) falls back to fitView().
+ */
+export function homeView(bounds, fovDeg, aspect, hint = null) {
+  if (!hint && !insideBounds(ORIGIN, bounds, 0.1)) return fitView(bounds, fovDeg, aspect);
+  const position = hint ? hint.position : ORIGIN;
+  const dir = viewDirection(hint ? hint.look : null);
   const { c, radius } = centerAndRadius(bounds);
-  const d = Math.max(0.5, -c[2]);
-  const reach = Math.hypot(c[0], c[1], c[2]) + radius;
+  const rel = { x: c[0] - position.x, y: c[1] - position.y, z: c[2] - position.z };
+  const d = Math.max(0.5, rel.x * dir.x + rel.y * dir.y + rel.z * dir.z);
+  const reach = Math.hypot(rel.x, rel.y, rel.z) + radius;
   return {
-    target: { x: 0, y: 0, z: -d },
-    position: origin,
+    target: { x: position.x + dir.x * d, y: position.y + dir.y * d, z: position.z + dir.z * d },
+    position: { x: position.x, y: position.y, z: position.z },
     near: Math.max(0.01, radius * 0.001),
     far: Math.max(reach, d) * 10,
   };

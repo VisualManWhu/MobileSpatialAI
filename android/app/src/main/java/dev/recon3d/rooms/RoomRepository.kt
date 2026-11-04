@@ -1,5 +1,6 @@
 package dev.recon3d.rooms
 
+import dev.recon3d.viewer.HomeView
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,6 +45,8 @@ data class CaptureRecord(
     val frameCount: Int = 0,
     /** Points in [pointsPath]. */
     val pointCount: Int = 0,
+    /** Viewer start camera (trajectory centre), computed from the zip on first view; null until then. */
+    val home: HomeView? = null,
 )
 
 /**

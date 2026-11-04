@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -37,8 +38,11 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.webkit.WebViewAssetLoader
 import dev.recon3d.rooms.RoomRepository
 import java.io.ByteArrayInputStream
+import java.io.File
 import java.io.FileInputStream
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.withContext
 
 private const val ASSET_HOST = "appassets.androidplatform.net"
 private const val VIEWER_URL =
@@ -61,19 +65,32 @@ private sealed interface ViewerState {
 /** 3DGS viewer for one capture's downloaded `scene.splat` (bundled three.js + Spark in a WebView). */
 @Composable
 fun ViewerScreen(repo: RoomRepository, roomId: String, captureId: String) {
-    val scenePath = remember(roomId, captureId) {
-        runCatching { repo.capture(roomId, captureId).scenePath }.getOrNull()
-    }
-    if (ScenePathPolicy.resolve(ScenePathPolicy.SCENE_NAME, scenePath) == null) {
+    val record = remember(roomId, captureId) { runCatching { repo.capture(roomId, captureId) }.getOrNull() }
+    if (ScenePathPolicy.resolve(ScenePathPolicy.SCENE_NAME, record?.scenePath) == null) {
         Message(MSG_NO_SCENE)
         return
     }
-    SceneViewer(scenePath!!)
+    record!!
+    // The camera starts at the trajectory centre. Older records have no cached HomeView: derive it
+    // from the capture zip once (a few hundred JSON lines) and store it; no zip -> viewer default.
+    val home by produceState<Result<HomeView?>?>(initialValue = record.home?.let { Result.success(it) }, record.id) {
+        if (value != null) return@produceState
+        val computed = withContext(Dispatchers.IO) { HomeView.fromCaptureZip(File(record.zipPath)) }
+        if (computed != null) runCatching { repo.editCapture(roomId, record.id) { it.copy(home = computed) } }
+        value = Result.success(computed)
+    }
+    when (val h = home) {
+        null -> Message(MSG_LOADING)
+        else -> SceneViewer(record.scenePath!!, home = h.getOrNull())
+    }
 }
 
-/** WebView viewer for one `.splat` file at [scenePath] (also used by the capture preview). */
+/**
+ * WebView viewer for one `.splat` file at [scenePath] (also used by the capture preview).
+ * [home]: where the camera starts (see [HomeView]); null leaves the page's own default.
+ */
 @Composable
-internal fun SceneViewer(scenePath: String) {
+internal fun SceneViewer(scenePath: String, home: HomeView? = null) {
     // Each retry bumps the attempt: a fresh WebView, a fresh watchdog, stale callbacks ignored.
     var attempt by remember(scenePath) { mutableIntStateOf(0) }
     var state by remember(scenePath) { mutableStateOf<ViewerState>(ViewerState.Loading) }
@@ -93,6 +110,7 @@ internal fun SceneViewer(scenePath: String) {
                     createViewerWebView(
                         context = context,
                         scenePath = scenePath,
+                        home = home,
                         onLoaded = { if (mine == attempt) state = ViewerState.Loaded(it) },
                         onError = { if (mine == attempt) state = ViewerState.Failed(it) },
                     )
@@ -151,6 +169,7 @@ private class ViewerBridge(
 private fun createViewerWebView(
     context: Context,
     scenePath: String,
+    home: HomeView?,
     onLoaded: (Int) -> Unit,
     onError: (String) -> Unit,
 ): WebView {
@@ -192,7 +211,7 @@ private fun createViewerWebView(
                 if (request.isForMainFrame) onError(MSG_PAGE_FAILED)
             }
         }
-        loadUrl(VIEWER_URL)
+        loadUrl(VIEWER_URL + (home?.query() ?: ""))
     }
 }
 
