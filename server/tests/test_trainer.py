@@ -516,6 +516,19 @@ def test_profile_defaults_mcmc_without_pruning():
         assert p.opacity_reg == 0.01 and p.scale_reg == 0.01
         assert p.far_m == 5.0 and p.bbox_margin_m == 5.0 and p.contrib_view_px == 1.0
         assert p.support_far_m == 2.0 and p.support_dist_m == 0.3
+        assert p.appearance_lr == 0.0 and p.appearance_reg == 1e-2
+
+
+@pytest.mark.gpu
+def test_trains_with_affine_colour_correction(synthetic_ts, caplog):
+    p = dataclasses.replace(PROFILES["laptop"], iterations=300, appearance_lr=1e-3)
+    with caplog.at_level(logging.INFO, logger="recon3d.recon.trainer"):
+        splats = train(synthetic_ts[0], p, on_progress=lambda p: None)
+    assert splats.means.shape[0] > 0
+    msgs = [r.getMessage() for r in caplog.records if "逐帧颜色校正" in r.getMessage()]
+    assert len(msgs) == 1
+    # The correction moved off the identity (non-zero gains / offsets reported).
+    assert "最大 0.000" not in msgs[0]
 
 
 def test_contrib_pass_skipped_soon_after_opacity_reset():

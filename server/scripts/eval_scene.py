@@ -9,7 +9,8 @@ Usage (Ubuntu, from server/):
       pipeline, then evaluates the new scene.ply
 
 Metrics (also written to eval.json next to the evaluated ply):
-  - PSNR of every training view rendered at its capture pose: median, min, worst 5 indices
+  - PSNR of every training view rendered at its capture pose: median, min, worst 5 indices; plus the median
+    after a per-view least-squares affine colour fit (exposure-independent)
     (0-based position in frames.jsonl)
   - floater score: among Gaussians with sigmoid(opacity) > 0.5, the fraction whose nearest
     confidence-filtered initial point (init_points, conf >= 0.5) is farther than 0.10 m
@@ -39,8 +40,26 @@ WORST_K = 5
 # Profile fields recorded in eval.json; only known (and reported) when this run trained the ply.
 TRAIN_SETTINGS = (
     "depth_lambda", "pose_lr", "strategy", "far_m", "bbox_margin_m", "support_far_m", "support_dist_m", "contrib_min_views",
-    "contrib_min_px", "contrib_view_px", "sor_sigma", "opacity_reg", "scale_reg",
+    "contrib_min_px", "contrib_view_px", "sor_sigma", "opacity_reg", "scale_reg", "appearance_lr", "appearance_reg",
 )
+
+
+def _matched_mse(img, gt) -> float:
+    """MSE after the best per-view affine colour fit rgb' = A rgb + b (least squares on a pixel subsample).
+
+    Separates exposure / white-balance mismatch between the exported colours and this frame from
+    geometry and blur: a scene trained with per-frame colour correction renders the *mean* frame's
+    colours, so its plain PSNR drops on every frame whose exposure differs from the mean.
+    """
+    import torch
+
+    x = img.reshape(-1, 3).double()
+    y = gt.reshape(-1, 3).double()
+    step = max(1, len(x) // 200_000)
+    xs = torch.cat([x[::step], torch.ones(len(x[::step]), 1, dtype=x.dtype, device=x.device)], dim=1)
+    m = torch.linalg.lstsq(xs, y[::step]).solution  # [4,3]
+    pred = x @ m[:3] + m[3]
+    return ((pred - y) ** 2).mean().item()
 
 
 def _train(job_dir: Path, out_dir: Path, profile: Profile) -> float:
@@ -88,12 +107,15 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack
 
     # One view at a time: stacking 193 renders would not fit next to the model on 8 GB.
     psnr = np.empty(len(ts.c2w), np.float64)
+    psnr_matched = np.empty(len(ts.c2w), np.float64)
     for i in range(len(ts.c2w)):
         view = TrainingSet(images=ts.images[i : i + 1], K=ts.K[i : i + 1], c2w=ts.c2w[i : i + 1], depths=[None])
         img = render(splats, view)[0]
-        mse = ((img - ts.images[i].to(img.device)) ** 2).mean().item()
+        gt = ts.images[i].to(img.device)
+        mse = ((img - gt) ** 2).mean().item()
         psnr[i] = 10.0 * np.log10(1.0 / max(mse, 1e-12))
-        del img
+        psnr_matched[i] = 10.0 * np.log10(1.0 / max(_matched_mse(img, gt), 1e-12))
+        del img, gt
 
     offtrack_png = None
     if offtrack_m > 0 and offtrack_views > 0:
@@ -140,8 +162,11 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack
         "sor_sigma": profile.sor_sigma,
         "opacity_reg": profile.opacity_reg,
         "scale_reg": profile.scale_reg,
+        "appearance_lr": profile.appearance_lr,
+        "appearance_reg": profile.appearance_reg,
         "views": int(len(psnr)),
         "psnr_median": float(np.median(psnr)),
+        "psnr_matched_median": float(np.median(psnr_matched)),
         "psnr_min": float(psnr.min()),
         "psnr_worst5": [{"index": int(i), "psnr": float(psnr[i])} for i in worst],
         "gaussians": int(n_gauss),
@@ -172,6 +197,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--sor-sigma", type=float, default=None, help="离群点滤波：均值外的标准差倍数（0 关闭）")
     ap.add_argument("--opacity-reg", type=float, default=None, help="不透明度正则权重（0 关闭）")
     ap.add_argument("--scale-reg", type=float, default=None, help="尺度正则权重（0 关闭）")
+    ap.add_argument("--appearance-lr", type=float, default=None, help="逐帧仿射颜色校正的学习率（0 关闭）")
+    ap.add_argument("--appearance-reg", type=float, default=None, help="颜色校正向单位阵的正则权重")
     ap.add_argument("--strategy", default=None, choices=["default", "mcmc"], help="致密化策略（default 或 mcmc）")
     ap.add_argument("--dump-pruned", action="store_true", help="把贡献度剪枝和离群点滤波移除的高斯写入 pruned.ply（需 --train）")
     args = ap.parse_args(argv)
@@ -194,6 +221,8 @@ def main(argv: list[str] | None = None) -> int:
             ("sor_sigma", args.sor_sigma),
             ("opacity_reg", args.opacity_reg),
             ("scale_reg", args.scale_reg),
+            ("appearance_lr", args.appearance_lr),
+            ("appearance_reg", args.appearance_reg),
             ("strategy", args.strategy),
         )
         if v is not None
@@ -201,7 +230,7 @@ def main(argv: list[str] | None = None) -> int:
     if (overrides or args.dump_pruned) and not args.train:
         ap.error(
             "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --support-far-m / --support-dist-m / --contrib-min-views / --contrib-min-px"
-            " / --contrib-view-px / --sor-sigma / --opacity-reg / --scale-reg / --strategy / --dump-pruned 只能和 --train 一起用"
+            " / --contrib-view-px / --sor-sigma / --opacity-reg / --scale-reg / --appearance-lr / --appearance-reg / --strategy / --dump-pruned 只能和 --train 一起用"
         )
     profile = dataclasses.replace(profile, **overrides)
 
@@ -230,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"模型：{ply}")
     print(f"视角数：{res['views']}")
-    print(f"PSNR 中位数 {res['psnr_median']:.2f} dB，最小 {res['psnr_min']:.2f} dB")
+    print(f"PSNR 中位数 {res['psnr_median']:.2f} dB，最小 {res['psnr_min']:.2f} dB；逐帧颜色匹配后中位数 {res['psnr_matched_median']:.2f} dB")
     print("最差 5 帧：" + "，".join(f"#{w['index']} {w['psnr']:.2f}" for w in res["psnr_worst5"]))
     print(
         f"floater 分数：{res['floater_score']:.4f}"

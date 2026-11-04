@@ -20,6 +20,7 @@ from recon3d.config import Profile
 from recon3d.recon.bounds import SceneBounds
 from recon3d.recon.dataset import TrainingSet
 from recon3d.recon.init_points import init_points
+from recon3d.recon.appearance import AffineColor
 from recon3d.recon.pose_opt import PoseRefine
 
 log = logging.getLogger(__name__)
@@ -475,6 +476,12 @@ def train(
     # Pose refinement starts with densification, once the initial cloud has settled.
     pose: PoseRefine | None = None
     pose_opt = None
+    # Per-frame affine colour correction (opt-in), learned from step 0.
+    color: AffineColor | None = None
+    color_opt = None
+    if profile.appearance_lr > 0:
+        color = AffineColor(n_img, device)
+        color_opt = torch.optim.Adam(color.parameters(), lr=profile.appearance_lr)
     # Depth usability is decided once per frame; per-step cost is a list lookup.
     has_depth = [ts.depths[i] is not None for i in range(n_img)]
     depth_ok = [use_depth and _depth_loss_usable(ts, i, H, W) for i in range(n_img)]
@@ -518,6 +525,8 @@ def train(
         render_mode = "RGB+ED" if depth_ok[i] and depth_vms[i] is None else "RGB"
         out, _, info = _rasterize(params, vm, Ks[i : i + 1], W, H, sh_deg, render_mode)
         img = out[..., :3]
+        if color is not None:
+            img = color(img, idx)
         gt = images[i : i + 1].to(device, non_blocking=True)
         strategy.step_pre_backward(params, optimizers, state, step, info)
         l1 = (img - gt).abs().mean()
@@ -541,12 +550,17 @@ def train(
                 _warn_skip(i, "没有可用的深度像素（置信度全为 0）")
         if pose is not None:
             loss = loss + POSE_REG * pose.reg()
+        if color is not None and profile.appearance_reg:
+            loss = loss + profile.appearance_reg * color.reg()
         if profile.opacity_reg or profile.scale_reg:
             loss = loss + reg_loss(params, profile.opacity_reg, profile.scale_reg)
         loss.backward()
         if pose_opt is not None:
             pose_opt.step()
             pose_opt.zero_grad(set_to_none=True)
+        if color_opt is not None:
+            color_opt.step()
+            color_opt.zero_grad(set_to_none=True)
         # Same order as upstream simple_trainer: optimizer step first, then the
         # strategy (grow/prune) on the updated params.
         for opt in optimizers.values():
@@ -601,4 +615,10 @@ def train(
         )
     log.info("训练耗时 %.1f s（%d 步）", time.monotonic() - t_start, iters)
     _log_pose_stats(pose)
+    if color is not None:
+        st = color.stats()
+        log.info(
+            "逐帧颜色校正：增益偏离单位阵 ||A-I|| 中位数 %.3f / 最大 %.3f，偏置 ||b|| 中位数 %.3f / 最大 %.3f（导出时丢弃）",
+            st["gain_med"], st["gain_max"], st["off_med"], st["off_max"],
+        )
     return Splats(**{k: v.detach() for k, v in params.items()})

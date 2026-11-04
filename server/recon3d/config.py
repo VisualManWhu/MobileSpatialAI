@@ -61,6 +61,13 @@ class Profile:
     # floater score 0.375 -> 0.116, indoor 5cba 23.59 -> 24.30 dB and opaque floaters 57.6k -> 16.2k
     # (docs/acceptance/phase1.md section 5).
     strategy: str = "mcmc"
+    # Per-frame affine colour correction (recon/appearance.py), opt-in (appearance_lr = 0 turns it off):
+    # each training frame learns rgb' = A rgb + b (A = I, b = 0 at start) applied to the render before
+    # the photometric loss, so AE/AWB drift between frames is not fitted with semi-transparent blobs.
+    # Dropped at export. appearance_reg * mean(||A - I||^2 + ||b||^2) pins the gauge so the exported
+    # colours stay those of an average frame.
+    appearance_lr: float = 0.0
+    appearance_reg: float = 1e-2
 
 
 PROFILES: dict[str, Profile] = {
