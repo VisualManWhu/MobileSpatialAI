@@ -1,23 +1,28 @@
 """HTTP API, see docs/api.md."""
 from __future__ import annotations
 
+import logging
 from contextlib import asynccontextmanager
 from functools import lru_cache
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 
 from recon3d import __version__
+from recon3d.api.resumable import BUSY
 from recon3d.api.resumable import router as resumable_router
 from recon3d.api.status_page import HTML as STATUS_PAGE
 from recon3d.api.upload import FORM_OVERHEAD, receive_capture
 from recon3d.api.upload import too_large as _too_large
 from recon3d.config import Profile
-from recon3d.jobs.store import JobStore
+from recon3d.jobs.store import JobActive, JobStore, UploadBusy
 from recon3d.jobs.worker import Worker
+
+log = logging.getLogger(__name__)
 
 NOT_FOUND = "任务不存在"
 NOT_DONE = "任务尚未完成"
+TRAINING = "任务正在训练，完成后再删"
 NO_GPU = "无 GPU"
 
 
@@ -106,6 +111,20 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
     def get_job(job_id: str):
         s = status_or_404(job_id)
         return {"job_id": s.job_id, "state": s.state, "progress": s.progress, "message": s.message}
+
+    @api.delete("/jobs/{job_id}", status_code=204, response_class=Response)
+    def delete_job(job_id: str):
+        """Remove a job or an in-progress upload; see docs/api.md for the 404/409 cases."""
+        try:
+            store.delete(job_id)
+        except KeyError:
+            raise HTTPException(404, NOT_FOUND) from None
+        except JobActive:
+            raise HTTPException(409, TRAINING) from None
+        except UploadBusy as e:
+            return JSONResponse({"detail": BUSY, "received": e.received}, status_code=409)
+        log.info("deleted job %s", job_id)
+        return Response(status_code=204)
 
     @api.get("/jobs/{job_id}/scene.splat")
     def get_splat(job_id: str):

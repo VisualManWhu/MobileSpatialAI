@@ -401,3 +401,38 @@ def test_oversize_put_with_many_body_messages_is_413(tmp_path):
     status, body = _put_asgi(app, info.upload_id, 0, [b"x" * 10] * 12)
     assert status == 413
     assert store.resumable(info.upload_id) is None
+
+
+# --- delete (docs/superpowers/specs/2026-11-05-recon3d-delete-design.md) ---
+
+
+def test_delete_job(client):
+    jid = client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    wait_until(lambda: client.get(f"/api/v1/jobs/{jid}").json()["state"] == "done")
+    r = client.delete(f"/api/v1/jobs/{jid}")
+    assert r.status_code == 204 and r.content == b""
+    assert client.get(f"/api/v1/jobs/{jid}").status_code == 404
+    assert client.delete(f"/api/v1/jobs/{jid}").status_code == 404
+    assert client.delete("/api/v1/jobs/zzz").json() == {"detail": "任务不存在"}
+
+
+def test_delete_training_job_is_409(client_slow):
+    jid = client_slow.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    wait_until(lambda: client_slow.get(f"/api/v1/jobs/{jid}").json()["state"] == "training")
+    r = client_slow.delete(f"/api/v1/jobs/{jid}")
+    assert r.status_code == 409 and r.json() == {"detail": "任务正在训练，完成后再删"}
+    assert client_slow.get(f"/api/v1/jobs/{jid}").status_code == 200
+
+
+def test_delete_resumable_upload(tmp_path):
+    store = JobStore(tmp_path / "data")
+    with TestClient(create_app(store, Worker(store, _fast), PROFILES["laptop"])) as c:
+        data = b"d" * 3000
+        uid = _begin(c, data)
+        _put(c, uid, 0, data[:1000])
+        with store._upload_lock(uid):
+            r = c.delete(f"/api/v1/jobs/{uid}")
+            assert r.status_code == 409 and r.json() == {"detail": "该上传正在接收中", "received": 1000}
+        assert c.delete(f"/api/v1/jobs/{uid}").status_code == 204
+        assert c.get(f"/api/v1/uploads/{uid}").status_code == 404
+        assert all(j["job_id"] != uid for j in c.get("/api/v1/jobs").json()["jobs"])

@@ -69,6 +69,8 @@ class Worker:
 
     def _run(self, job_id: str) -> None:
         store = self.store
+        if store.get(job_id) is None:
+            return  # deleted while queued (DELETE /jobs/{id}); nothing left to run
         store.update(job_id, state="training", progress=0.0, message="训练中")
 
         def on_progress(p: float) -> None:

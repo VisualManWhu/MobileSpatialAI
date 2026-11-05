@@ -60,6 +60,10 @@ class ChecksumMismatch(Exception):
     """The finished part's SHA-256 is not the one declared at begin; the upload is deleted."""
 
 
+class JobActive(Exception):
+    """delete() while the worker is training/exporting the job (its directory is being written)."""
+
+
 @dataclass(frozen=True)
 class ResumableInfo:
     upload_id: str
@@ -184,6 +188,31 @@ class JobStore:
             info = self.resumable(d.name)
             if info is not None:
                 self._write_upload_meta(info, received=self._part_size(d.name))
+
+    def delete(self, job_id: str) -> None:
+        """Remove a job (done/failed/queued) or an in-progress resumable upload, directory and all.
+
+        Raises KeyError (unknown or malformed id), JobActive (training/exporting: the pipeline is
+        writing into the directory) or UploadBusy (a PUT holds the upload lock). A queued job's id
+        stays in the worker queue; Worker._run skips ids whose status is gone.
+        """
+        if not _JOB_ID.fullmatch(job_id):
+            raise KeyError(job_id)
+        d = self.job_dir(job_id)
+        if not d.is_dir():
+            raise KeyError(job_id)
+        lock = self._upload_lock(job_id)
+        if not lock.acquire(blocking=False):
+            raise UploadBusy(self._part_size(job_id))
+        try:
+            with self._lock:  # update() holds it for its read-modify-write; no status write interleaves
+                s = self.get(job_id)
+                if s is not None and s.state in ("training", "exporting"):
+                    raise JobActive(job_id)
+                shutil.rmtree(d, ignore_errors=True)
+                self._upload_locks.pop(job_id, None)
+        finally:
+            lock.release()
 
     # --- resumable uploads ---
 

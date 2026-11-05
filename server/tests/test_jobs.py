@@ -12,6 +12,7 @@ from recon3d.capture.format import CaptureFormatError
 from recon3d.jobs.store import (
     ChecksumMismatch,
     IncompleteUpload,
+    JobActive,
     JobStore,
     OffsetMismatch,
     UploadBusy,
@@ -383,3 +384,53 @@ def test_list_resumable_newest_first_excludes_finished(tmp_path):
     got = s.list_resumable()
     assert [i.upload_id for i in got] == [b.upload_id, a.upload_id]
     assert got[1].received == 100
+
+
+# --- delete (docs/superpowers/specs/2026-11-05-recon3d-delete-design.md) ---
+
+
+def test_delete_removes_finished_job_dir(store):
+    j = store.create(io.BytesIO(b"x"))
+    store.update(j, state="done", progress=1.0, message="完成")
+    store.delete(j)
+    assert not store.job_dir(j).exists() and store.get(j) is None
+    with pytest.raises(KeyError):
+        store.delete(j)
+
+
+def test_delete_refuses_training_job(store):
+    j = store.create(io.BytesIO(b"x"))
+    store.update(j, state="training", progress=0.3, message="训练中")
+    with pytest.raises(JobActive):
+        store.delete(j)
+    assert store.get(j).state == "training"
+
+
+def test_delete_resumable_upload_and_busy(tmp_path):
+    s = _rstore(tmp_path)
+    info = s.begin_resumable(10, "0" * 64)
+    lock = s._upload_lock(info.upload_id)
+    lock.acquire()
+    try:
+        with pytest.raises(UploadBusy):
+            s.delete(info.upload_id)
+    finally:
+        lock.release()
+    s.delete(info.upload_id)
+    assert s.resumable(info.upload_id) is None and not s.job_dir(info.upload_id).exists()
+
+
+def test_delete_rejects_bad_ids(store):
+    for bad in ("nope", "../../etc", "ABCDEF123456"):
+        with pytest.raises(KeyError):
+            store.delete(bad)
+
+
+def test_delete_queued_job_is_skipped_by_worker(store, make_worker):
+    ran = []
+    j1 = store.create(io.BytesIO(b"a"))
+    j2 = store.create(io.BytesIO(b"b"))
+    store.delete(j1)
+    make_worker(lambda d, p: ran.append(d.name)).start()
+    wait_until(lambda: store.get(j2) is not None and store.get(j2).state == "done")
+    assert ran == [j2] and not store.job_dir(j1).exists()
