@@ -134,7 +134,7 @@ Tailscale 会在手机和笔记本之间建一条加密的虚拟局域网，两�
 1. **笔记本（Windows）**：打开 https://tailscale.com/download 下载 Windows 版并安装，登录一个账号。
 2. **手机**：在 Google Play 安装 "Tailscale"，用**同一个账号**登录，按提示允许建立 VPN。
 3. **WSL 里不用装 Tailscale**：第 2 步的端口转发监听在 Windows 的所有网卡上，Tailscale 网卡也包括在内。
-4. **防火墙规则：只放行 Tailscale 地址段**。Windows 通常把 Tailscale 网卡归为"公用网络"，第 2 步的 `-Profile Private` 规则对它不生效。
+4. **防火墙规则：只放行 Tailscale 地址段**。先在 PowerShell 里看 `Get-NetConnectionProfile`：如果 Tailscale 网卡的 `NetworkCategory` 已是 `Private`（这台 ThinkBook 上实测如此），第 2 步的 `-Profile Private` 规则已经对它生效，本步可跳过。显示 `Public` 时才需要下面这条规则：
    这里改用一条 `-Profile Any`（任何网络类型都生效）的规则，但加上 `-RemoteAddress 100.64.0.0/10`：
    这是 Tailscale 给设备分配的地址段，**只有登录了你 Tailscale 账号的设备能连进来**；
    即使笔记本连着咖啡馆、机场等公共 Wi-Fi，同一 Wi-Fi 上的陌生设备也访问不了 8765 端口。
