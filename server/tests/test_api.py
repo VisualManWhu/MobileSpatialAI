@@ -326,3 +326,63 @@ def test_concurrent_put_is_409(tmp_path):
             r = _put(c, uid, 1, b"2")
             assert r.status_code == 409 and r.json() == {"detail": "该上传正在接收中", "received": 1}
         assert _put(c, uid, 1, b"2").json() == {"received": 2}
+
+
+def _put_asgi(app, upload_id, offset, messages):
+    """Raw ASGI PUT whose body arrives as several messages; returns (status, body dict)."""
+    import anyio
+
+    sent = []
+
+    async def run():
+        pulled = 0
+
+        async def receive():
+            nonlocal pulled
+            if pulled < len(messages):
+                body = messages[pulled]
+                pulled += 1
+                return {"type": "http.request", "body": body, "more_body": pulled < len(messages)}
+            await anyio.sleep(3600)  # a client that never disconnects
+
+        async def send(msg):
+            sent.append(msg)
+
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "PUT",
+            "scheme": "http", "path": f"/api/v1/uploads/{upload_id}",
+            "raw_path": f"/api/v1/uploads/{upload_id}".encode(), "query_string": b"",
+            "root_path": "", "headers": [(b"upload-offset", str(offset).encode()), (b"content-type", b"application/octet-stream")],
+            "client": ("test", 1), "server": ("test", 80),
+        }
+        with anyio.fail_after(10):
+            await app(scope, receive, send)
+
+    anyio.run(run)
+    import json
+
+    body = b"".join(m.get("body", b"") for m in sent if m["type"] == "http.response.body")
+    return sent[0]["status"], json.loads(body or b"{}")
+
+
+def test_busy_put_with_many_body_messages_still_answers_409(tmp_path):
+    """uvicorn hands a 4 MB chunk over as dozens of messages; the 409 must come back without the
+    handler stalling on a body nobody consumes (review finding C1)."""
+    store = JobStore(tmp_path / "data")
+    app = create_app(store, Worker(store, _fast), PROFILES["laptop"])
+    info = store.begin_resumable(1000, "0" * 64)
+    store.append_resumable(info.upload_id, 0, [b"1"])
+    with store._upload_lock(info.upload_id):
+        status, body = _put_asgi(app, info.upload_id, 1, [b"x" * 10] * 12)
+    assert status == 409 and body == {"detail": "该上传正在接收中", "received": 1}
+    status, body = _put_asgi(app, info.upload_id, 0, [b"x" * 10] * 12)
+    assert status == 409 and body == {"detail": "偏移不匹配", "received": 1}
+
+
+def test_oversize_put_with_many_body_messages_is_413(tmp_path):
+    store = JobStore(tmp_path / "data")
+    app = create_app(store, Worker(store, _fast), PROFILES["laptop"])
+    info = store.begin_resumable(15, "0" * 64)
+    status, body = _put_asgi(app, info.upload_id, 0, [b"x" * 10] * 12)
+    assert status == 413
+    assert store.resumable(info.upload_id) is None

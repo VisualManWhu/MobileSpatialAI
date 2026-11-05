@@ -1,5 +1,6 @@
 import hashlib
 import io
+import os
 import json
 import threading
 import time
@@ -344,3 +345,26 @@ def test_sweep_skips_upload_being_received(tmp_path):
     release.set()
     t.join(5)
     assert s.resumable(i.upload_id).received == 1
+
+
+def test_finish_waiting_behind_another_finish_is_idempotent(tmp_path):
+    """Client retries finish while the first one is still hashing: the second must not see the renamed
+    part as "0 bytes received" (review finding I3)."""
+    s = _rstore(tmp_path)
+    data = b"abcd"
+    i = s.begin_resumable(4, hashlib.sha256(data).hexdigest())
+    s.append_resumable(i.upload_id, 0, [data])
+    lock = s._upload_lock(i.upload_id)
+    result = {}
+    lock.acquire()
+    t = threading.Thread(target=lambda: result.update(second=s.finish_resumable(i.upload_id)))
+    t.start()
+    time.sleep(0.2)  # second finish is now blocked on the lock, having read the metadata
+    # First finish (simulated inline while holding the lock).
+    d = s.job_dir(i.upload_id)
+    os.replace(d / "capture.zip.part", d / "capture.zip")
+    (d / "upload.json").unlink()
+    s._commit(i.upload_id, 4)
+    lock.release()
+    t.join(5)
+    assert result["second"] == i.upload_id

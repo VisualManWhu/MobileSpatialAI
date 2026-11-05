@@ -61,7 +61,8 @@ interface Api {
 
     /**
      * Downloads `scene.splat` to [dest], resuming a leftover `dest.part` with `Range`; [dest] only
-     * appears once the download is complete. [onRetry] gets the consecutive-failure count before each wait.
+     * appears once the download is complete. [onRetry] gets the consecutive-failure count before each
+     * wait, and 0 once a retried request gets through again.
      */
     suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit = {})
 }
@@ -201,6 +202,7 @@ class ApiClient(
             if (have > 0) builder.header("Range", "bytes=$have-")
             try {
                 call(builder.build()) { response ->
+                    if (attempt > 0) onRetry(0)  // back in business: the UI drops its reconnect text
                     val append = response.code == 206
                     response.body!!.source().use { src ->
                         java.io.FileOutputStream(part, append).use { out -> src.inputStream().copyTo(out) }

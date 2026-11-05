@@ -87,12 +87,11 @@ def router(store: JobStore) -> APIRouter:
         send, recv = anyio.create_memory_object_stream[bytes](max_buffer_size=4)
 
         def chunks():
-            with recv:
-                while True:
-                    try:
-                        yield anyio.from_thread.run(recv.receive)
-                    except anyio.EndOfStream:
-                        return
+            while True:
+                try:
+                    yield anyio.from_thread.run(recv.receive)
+                except (anyio.EndOfStream, anyio.ClosedResourceError):
+                    return
 
         async def feed() -> None:
             with send:
@@ -106,13 +105,20 @@ def router(store: JobStore) -> APIRouter:
                     except Exception:  # ClientDisconnect and friends: keep what we have
                         return
                     if chunk:
-                        await send.send(chunk)
+                        try:
+                            await send.send(chunk)
+                        except (anyio.BrokenResourceError, anyio.ClosedResourceError):
+                            return  # the writer stopped early (409/413): drain no further
 
         outcome: list = []  # [received] or [exception]; a raise inside the task group would be wrapped
 
         async def write() -> None:
+            # The store may reject before touching the body (busy, offset mismatch, unknown id) or stop
+            # early (over size); closing the receive side either way unblocks feed() so the handler
+            # answers at once instead of waiting on a body nobody reads.
             try:
-                outcome.append(await to_thread.run_sync(store.append_resumable, upload_id, offset, chunks()))
+                with recv:
+                    outcome.append(await to_thread.run_sync(store.append_resumable, upload_id, offset, chunks()))
             except Exception as e:  # noqa: BLE001 - re-raised below, outside the group
                 outcome.append(e)
 

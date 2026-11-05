@@ -146,6 +146,8 @@ class UploadViewModel(
             return null
         }
         val resumeId = repo.capture(roomId, captureId).uploadId
+        // Any upload yields a new job; a partial download of an earlier job's scene must not be appended to.
+        File(scenesDir, "$roomId/$captureId/scene.splat.part").delete()
         repo.editCapture(roomId, captureId) {
             it.copy(state = "uploading", progress = if (resumeId != null) it.progress else 0f, message = null, jobId = null, scenePath = null)
         }
@@ -211,9 +213,10 @@ class UploadViewModel(
                     }
                     val dest = File(scenesDir, "$roomId/$captureId/scene.splat")
                     api.downloadScene(jobId, dest) { n ->
+                        val text = if (n == 0) MSG_DOWNLOADING else "$MSG_DOWNLOADING · ${reconnectingMessage(n)}"
                         try {
                             repo.editCapture(roomId, captureId) {
-                                if (it.state == "exporting") it.copy(message = "$MSG_DOWNLOADING · ${reconnectingMessage(n)}") else it
+                                if (it.state == "exporting") it.copy(message = text) else it
                             }
                         } catch (e: Exception) {
                             log("could not record download reconnect for $roomId/$captureId", e)

@@ -343,7 +343,7 @@ class ApiClientTest {
             .setBody(Buffer().write(byteArrayOf(3, 4))))
         val retries = mutableListOf<Int>()
         noSleep.downloadScene("j", dest) { retries += it }
-        assertEquals(listOf(1), retries)
+        assertEquals(listOf(1, 0), retries)  // 0 = the retried request got through
         assertNull(server.takeRequest().getHeader("Range"))
         assertEquals("bytes=2-", server.takeRequest().getHeader("Range"))
         assertArrayEquals(byteArrayOf(1, 2, 3, 4), dest.readBytes())

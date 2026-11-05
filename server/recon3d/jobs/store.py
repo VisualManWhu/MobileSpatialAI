@@ -265,6 +265,12 @@ class JobStore:
                 return upload_id
             raise KeyError(upload_id)
         with self._upload_lock(upload_id):
+            # Re-read under the lock: a finish that waited behind another one finds the job already made.
+            info = self.resumable(upload_id)
+            if info is None:
+                if self.get(upload_id) is not None:
+                    return upload_id
+                raise KeyError(upload_id)
             d = self.job_dir(upload_id)
             part = d / "capture.zip.part"
             received = self._part_size(upload_id)

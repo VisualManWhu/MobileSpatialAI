@@ -78,8 +78,15 @@ private class FakeApi : Api {
         return jobQueue.removeFirstOrNull() ?: jobResult
     }
 
+    /** Virtual-time delay inside downloadScene after the retry steps, to observe the record mid-download. */
+    var downloadDelayMs = 0L
+    /** Whether a stale scene.splat.part existed when downloadScene was called. */
+    var partExistedAtDownload: Boolean? = null
+
     override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) {
+        partExistedAtDownload = File(dest.path + ".part").exists()
         downloadRetrySteps.forEach(onRetry)
+        if (downloadDelayMs > 0) delay(downloadDelayMs)
         downloadFailure?.let { downloadFailure = null; throw it }
         dest.parentFile?.mkdirs()
         dest.writeBytes(sceneBytes)
@@ -407,6 +414,30 @@ class UploadViewModelTest {
         assertEquals("failed", rec.state)
         val during = rec.copy(state = "exporting", message = "$MSG_DOWNLOADING · ${reconnectingMessage(2)}")
         assertEquals("正在下载模型… · 网络中断，正在重连 (2)", captureStatusText(during))
+    }
+
+    @Test fun staleScenePartIsDroppedBeforeANewUpload() = runTest {  // review finding I1
+        val part = File(scenesDir, "$room/$cap/scene.splat.part").apply { parentFile!!.mkdirs(); writeBytes(byteArrayOf(7)) }
+        vm().start(room, cap); advanceUntilIdle()
+        assertEquals(false, api.partExistedAtDownload)
+        assertFalse(part.exists())
+        assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    @Test fun downloadReconnectMessageClearsWhenTransferResumes() = runTest {  // review finding I2
+        api.downloadRetrySteps = listOf(2); api.downloadDelayMs = 100
+        val vm = vm(); vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        assertEquals("正在下载模型… · 网络中断，正在重连 (2)", captureStatusText(repo.capture(room, cap)))
+        api.downloadRetrySteps = emptyList()
+        advanceUntilIdle()
+        assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    @Test fun downloadReconnectZeroRestoresDownloadingText() = runTest {
+        api.downloadRetrySteps = listOf(1, 0); api.downloadDelayMs = 100
+        val vm = vm(); vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        assertEquals("正在下载模型…", captureStatusText(repo.capture(room, cap)))
+        advanceUntilIdle()
     }
 
     @Test fun statusTextIsChinese() {
