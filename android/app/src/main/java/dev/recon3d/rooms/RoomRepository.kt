@@ -32,6 +32,8 @@ data class CaptureRecord(
     val zipPath: String,
     val kind: String = "model",
     val jobId: String? = null,
+    /** Server upload id while `uploading` (resumable protocol); kept on transport failure so retry continues. */
+    val uploadId: String? = null,
     val state: String = "local",
     /** 0..1: upload fraction while `uploading`, server progress afterwards. */
     val progress: Float = 0f,

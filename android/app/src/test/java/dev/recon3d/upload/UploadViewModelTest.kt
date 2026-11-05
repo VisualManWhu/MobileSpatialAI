@@ -65,8 +65,8 @@ private class FakeApi : Api {
         lastUploadId = uploadId
         if (uploadId == null) listener.onCreated("u1")
         uploadFailure?.let { uploadFailure = null; throw it }
-        if (uploadDelayMs > 0) delay(uploadDelayMs)
         retrySteps.forEach(listener::onRetry)
+        if (uploadDelayMs > 0) delay(uploadDelayMs)  // suspends between the retries and the progress
         progressSteps.forEach(listener::onProgress)
         return "j"
     }
@@ -336,9 +336,77 @@ class UploadViewModelTest {
         val vm = vm()
         api.progressSteps = (1..1000).map { it / 1000f } // 1000 callbacks, 100 distinct percents
         vm.start(room, cap); advanceUntilIdle()
-        // 1 write entering "uploading" + one per percent 1..100.
-        assertEquals(101, repo.uploadingWrites)
+        // 1 write entering "uploading", 1 for the upload id, then one per percent 0..100.
+        assertEquals(103, repo.uploadingWrites)
         assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    // --- resumable upload (spec 2026-11-05-recon3d-resumable-transfer-design.md §4) ---
+
+    @Test fun uploadIdIsPersistedThenClearedOnJobCreation() = runTest {
+        val vm = vm()
+        api.progressSteps = listOf(0.3f); api.uploadDelayMs = 100
+        vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        assertEquals("u1", repo.capture(room, cap).uploadId)
+        advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertNull(rec.uploadId); assertEquals("j", rec.jobId); assertEquals("done", rec.state)
+    }
+
+    @Test fun resumeInterruptedContinuesUploadWithStoredId() = runTest {
+        repo.editCapture(room, cap) { it.copy(state = "uploading", uploadId = "u9", progress = 0.4f) }
+        vm().resumeInterrupted(); advanceUntilIdle()
+        assertEquals("u9", api.lastUploadId)
+        assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    @Test fun resumeInterruptedWithoutIdStillFails() = runTest {  // records written by older app versions
+        repo.editCapture(room, cap) { it.copy(state = "uploading") }
+        vm().resumeInterrupted(); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state); assertEquals(MSG_UPLOAD_INTERRUPTED, rec.message)
+        assertEquals(0, api.uploads)
+    }
+
+    @Test fun reconnectMessageShownDuringUploadAndClearedByProgress() = runTest {
+        api.retrySteps = listOf(1, 2); api.uploadDelayMs = 100; api.progressSteps = listOf(0.37f)
+        val vm = vm()
+        vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        val rec = repo.capture(room, cap)
+        assertEquals("uploading", rec.state)
+        assertEquals(reconnectingMessage(2), rec.message)
+        assertEquals("上传中 0% · 网络中断，正在重连 (2)", captureStatusText(rec))
+        advanceUntilIdle()
+        assertEquals("done", repo.capture(room, cap).state)
+        assertNull(repo.capture(room, cap).message)
+    }
+
+    @Test fun checksumFailureClearsUploadIdAndOffersReupload() = runTest {
+        api.failUploadOnce(ApiException("文件校验失败，请重新上传", code = 422))
+        val vm = vm(); vm.start(room, cap); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state); assertEquals("文件校验失败，请重新上传", rec.message)
+        assertNull(rec.uploadId); assertEquals("重新上传", retryButtonLabel(rec))
+    }
+
+    @Test fun transportFailureKeepsUploadIdAndOffersContinue() = runTest {
+        api.failUploadOnce(ApiException(ApiClient.MSG_UNREACHABLE))  // FakeApi calls onCreated first
+        val vm = vm(); vm.start(room, cap); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state); assertEquals("u1", rec.uploadId)
+        assertEquals("继续上传", retryButtonLabel(rec))
+        vm.retry(room, cap); advanceUntilIdle()
+        assertEquals("u1", api.lastUploadId); assertEquals("done", repo.capture(room, cap).state)
+    }
+
+    @Test fun downloadReconnectShowsMessageWithDownloading() = runTest {
+        api.downloadRetrySteps = listOf(2)
+        api.failDownloadOnce(ApiException(ApiClient.MSG_UNREACHABLE))
+        val vm = vm(); vm.start(room, cap); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state)
+        val during = rec.copy(state = "exporting", message = "$MSG_DOWNLOADING · ${reconnectingMessage(2)}")
+        assertEquals("正在下载模型… · 网络中断，正在重连 (2)", captureStatusText(during))
     }
 
     @Test fun statusTextIsChinese() {

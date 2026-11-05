@@ -47,6 +47,10 @@ const val MAX_POLL_ERRORS = 10
 private const val MSG_RETRYING_PREFIX = "网络暂时不可用，正在重试"
 internal fun retryingMessage(n: Int) = "$MSG_RETRYING_PREFIX ($n/$MAX_POLL_ERRORS)"
 
+/** Upload/download transfer is waiting to reconnect (resumable protocol); n = consecutive failures so far. */
+const val MSG_RECONNECTING_PREFIX = "网络中断，正在重连"
+internal fun reconnectingMessage(n: Int) = "$MSG_RECONNECTING_PREFIX ($n)"
+
 /** Server 404 detail for an unknown job (docs/api.md): the job is gone, so retry must re-upload. */
 private const val MSG_JOB_GONE = "任务不存在"
 
@@ -94,12 +98,14 @@ class UploadViewModel(
     }
 
     /**
-     * Call once at app start: uploads cut off by process death are marked failed (the stream is
-     * lost), and jobs that were queued/training/exporting are polled again.
+     * Call once at app start: uploads cut off by process death continue from the persisted upload id
+     * (records from older versions without one are marked failed), and jobs that were
+     * queued/training/exporting are polled again.
      */
     fun resumeInterrupted() {
         for (room in repo.roomsNow()) for (rec in room.captures) {
             when {
+                rec.state == "uploading" && rec.uploadId != null -> start(room.id, rec.id)
                 rec.state == "uploading" -> repo.editCapture(room.id, rec.id) {
                     it.copy(state = "failed", message = MSG_UPLOAD_INTERRUPTED, jobId = null)
                 }
@@ -118,7 +124,10 @@ class UploadViewModel(
                 } catch (e: CancellationException) {
                     throw e
                 } catch (e: ApiException) {
-                    fail(roomId, captureId, e.messageZh, jobGone = e.messageZh == MSG_JOB_GONE)
+                    // A server 4xx during upload means this upload can never finish; a transport
+                    // failure keeps the id so "继续上传" resumes from the server's byte count.
+                    val fatalUpload = e.code != null && e.code in 400..499
+                    fail(roomId, captureId, e.messageZh, jobGone = e.messageZh == MSG_JOB_GONE, clearUploadId = fatalUpload)
                 } catch (e: Exception) {
                     log("unexpected error for $roomId/$captureId", e)
                     fail(roomId, captureId, MSG_UNEXPECTED, jobGone = false)
@@ -136,31 +145,41 @@ class UploadViewModel(
             fail(roomId, captureId, MSG_ZIP_MISSING, jobGone = true)
             return null
         }
+        val resumeId = repo.capture(roomId, captureId).uploadId
         repo.editCapture(roomId, captureId) {
-            it.copy(state = "uploading", progress = 0f, message = null, jobId = null, scenePath = null)
+            it.copy(state = "uploading", progress = if (resumeId != null) it.progress else 0f, message = null, jobId = null, scenePath = null)
         }
         // Persist only when the whole percent changes, whatever the client's callback rate.
-        var lastPercent = 0
-        // Temporary bridge until the view model persists the upload id (next task).
-        val jobId = api.upload(zip, null, object : UploadListener {
-            override fun onCreated(uploadId: String) {}
-            override fun onRetry(attempt: Int) {}
+        var lastPercent = -1
+        var reconnecting = false
+        // Listener callbacks run on a background thread: a throw there would escape the client, so only log.
+        fun record(what: String, edit: (CaptureRecord) -> CaptureRecord) {
+            try {
+                repo.editCapture(roomId, captureId) { if (it.state == "uploading") edit(it) else it }
+            } catch (e: Exception) {
+                log("could not record $what for $roomId/$captureId", e)
+            }
+        }
+        val jobId = api.upload(zip, resumeId, object : UploadListener {
+            override fun onCreated(uploadId: String) = record("upload id") { it.copy(uploadId = uploadId, progress = 0f) }
+
+            override fun onRetry(attempt: Int) {
+                reconnecting = true
+                record("reconnect") { it.copy(message = reconnectingMessage(attempt)) }
+            }
+
             override fun onProgress(fraction: Float) {
                 val percent = (fraction.coerceIn(0f, 1f) * 100).toInt()
-                if (percent != lastPercent) {
+                if (percent != lastPercent || reconnecting) {
                     lastPercent = percent
-                    // Runs on a background thread: a throw here would escape the client, so only log.
-                    try {
-                        repo.editCapture(roomId, captureId) {
-                            if (it.state == "uploading") it.copy(progress = percent / 100f) else it
-                        }
-                    } catch (e: Exception) {
-                        log("could not record upload progress for $roomId/$captureId", e)
-                    }
+                    reconnecting = false
+                    record("upload progress") { it.copy(progress = percent / 100f, message = null) }
                 }
             }
         })
-        repo.editCapture(roomId, captureId) { it.copy(state = "queued", jobId = jobId, progress = 0f, message = null) }
+        repo.editCapture(roomId, captureId) {
+            it.copy(state = "queued", jobId = jobId, uploadId = null, progress = 0f, message = null)
+        }
         return jobId
     }
 
@@ -191,7 +210,15 @@ class UploadViewModel(
                         it.copy(state = "exporting", progress = 1f, message = MSG_DOWNLOADING)
                     }
                     val dest = File(scenesDir, "$roomId/$captureId/scene.splat")
-                    api.downloadScene(jobId, dest)
+                    api.downloadScene(jobId, dest) { n ->
+                        try {
+                            repo.editCapture(roomId, captureId) {
+                                if (it.state == "exporting") it.copy(message = "$MSG_DOWNLOADING · ${reconnectingMessage(n)}") else it
+                            }
+                        } catch (e: Exception) {
+                            log("could not record download reconnect for $roomId/$captureId", e)
+                        }
+                    }
                     repo.editCapture(roomId, captureId) {
                         it.copy(state = "done", progress = 1f, message = null, scenePath = dest.path)
                     }
@@ -211,10 +238,15 @@ class UploadViewModel(
     }
 
     /** Marks the record failed; never throws (a failing disk must not crash the app from here). */
-    private fun fail(roomId: String, captureId: String, message: String, jobGone: Boolean) {
+    private fun fail(roomId: String, captureId: String, message: String, jobGone: Boolean, clearUploadId: Boolean = false) {
         try {
             repo.editCapture(roomId, captureId) {
-                it.copy(state = "failed", message = message, jobId = if (jobGone) null else it.jobId)
+                it.copy(
+                    state = "failed",
+                    message = message,
+                    jobId = if (jobGone) null else it.jobId,
+                    uploadId = if (clearUploadId) null else it.uploadId,
+                )
             }
         } catch (e: Exception) {
             log("could not record failure for $roomId/$captureId: $message", e)
@@ -243,20 +275,27 @@ fun captureStatusText(record: CaptureRecord): String {
         val base = captureStatusText(record.copy(message = null))
         return "$base · $retrying"
     }
+    val reconnecting = record.message?.takeIf { it.startsWith(MSG_RECONNECTING_PREFIX) }
+    if (reconnecting != null && record.state == "uploading") return "上传中 $pct% · $reconnecting"
     return when (record.state) {
         "local" -> "本地"
         "uploading" -> "上传中 $pct%"
         "queued" -> "排队中"
         "training" -> "训练中 $pct%"
-        "exporting" -> if (record.message == MSG_DOWNLOADING) MSG_DOWNLOADING else "导出中"
+        // While downloading the message is "正在下载模型…", possibly with a reconnect suffix.
+        "exporting" -> record.message?.takeIf { it.startsWith(MSG_DOWNLOADING) } ?: "导出中"
         "done" -> "完成"
         "failed" -> "失败：${record.message ?: "未知原因"}"
         else -> record.state
     }
 }
 
-/** "重试" resumes polling a known server job; "重新上传" sends the zip again. */
-fun retryButtonLabel(record: CaptureRecord): String = if (record.jobId != null) "重试" else "重新上传"
+/** "重试" resumes polling a known server job; "继续上传" resumes a known upload; "重新上传" sends the zip again. */
+fun retryButtonLabel(record: CaptureRecord): String = when {
+    record.jobId != null -> "重试"
+    record.uploadId != null -> "继续上传"
+    else -> "重新上传"
+}
 
 /**
  * Whether the row offers "看点云": the capture-time point cloud exists and the finished model is not there yet
