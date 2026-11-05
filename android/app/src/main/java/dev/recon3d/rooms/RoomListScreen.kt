@@ -2,6 +2,7 @@ package dev.recon3d.rooms
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.WindowInsets
@@ -12,6 +13,8 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
 import androidx.compose.material3.IconButton
@@ -25,6 +28,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -142,11 +146,15 @@ fun RoomScreen(
     onRetry: (captureId: String) -> Unit,
     onView: (captureId: String) -> Unit,
     onViewPoints: (captureId: String) -> Unit,
+    onDeleteCapture: (captureId: String) -> Unit,
+    onRedownload: (captureId: String) -> Unit,
+    onDeleteRoom: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val rooms by repo.rooms().collectAsState()
     val room = rooms.firstOrNull { it.id == roomId } ?: return
+    var menuOpen by remember { mutableStateOf(false) }
 
     Scaffold(
         modifier = modifier,
@@ -158,6 +166,16 @@ fun RoomScreen(
                 navigationIcon = {
                     IconButton(onClick = onBack, modifier = Modifier.semantics { contentDescription = "返回" }) {
                         Text("←", fontSize = 22.sp)
+                    }
+                },
+                actions = {
+                    Box {
+                        IconButton(onClick = { menuOpen = true }, modifier = Modifier.semantics { contentDescription = "更多" }) {
+                            Text("⋮", fontSize = 22.sp)
+                        }
+                        DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                            DropdownMenuItem(text = { Text("删除房间") }, onClick = { menuOpen = false; onDeleteRoom() })
+                        }
                     }
                 },
             )
@@ -183,6 +201,8 @@ fun RoomScreen(
                         onRetry = { onRetry(rec.id) },
                         onView = { onView(rec.id) },
                         onViewPoints = { onViewPoints(rec.id) },
+                        onDelete = { onDeleteCapture(rec.id) },
+                        onRedownload = { onRedownload(rec.id) },
                     )
                 }
             }

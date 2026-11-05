@@ -1,21 +1,32 @@
 package dev.recon3d.upload
 
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import dev.recon3d.net.Api
 import dev.recon3d.net.ApiClient
 import dev.recon3d.net.ApiException
@@ -330,7 +341,7 @@ fun retryButtonLabel(record: CaptureRecord): String = when {
  */
 fun showsPointsButton(record: CaptureRecord): Boolean = record.pointsPath != null && record.state != "done"
 
-/** One capture: id, Chinese status, progress bar while uploading/training, and its action button. */
+/** One capture: id, Chinese status, progress bar while uploading/training, its action button and a ⋮ menu (删除). */
 @Composable
 fun CaptureRow(
     record: CaptureRecord,
@@ -338,8 +349,11 @@ fun CaptureRow(
     onRetry: () -> Unit,
     onView: () -> Unit,
     onViewPoints: () -> Unit,
+    onDelete: () -> Unit,
+    onRedownload: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var menuOpen by remember { mutableStateOf(false) }
     Card(modifier.fillMaxWidth()) {
         Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -356,6 +370,15 @@ fun CaptureRow(
                         Text(retryButtonLabel(record))
                     }
                     "done" -> Button(onClick = onView) { Text("查看 3D") }
+                    STATE_REMOTE -> OutlinedButton(onClick = onRedownload) { Text("重新下载") }
+                }
+                Box {
+                    IconButton(onClick = { menuOpen = true }, modifier = Modifier.semantics { contentDescription = "更多" }) {
+                        Text("⋮", fontSize = 22.sp)
+                    }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(text = { Text("删除") }, onClick = { menuOpen = false; onDelete() })
+                    }
                 }
             }
             when (record.state) {

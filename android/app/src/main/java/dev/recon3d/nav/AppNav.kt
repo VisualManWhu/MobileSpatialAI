@@ -4,7 +4,10 @@ import android.widget.Toast
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.lifecycle.Lifecycle
@@ -15,14 +18,30 @@ import dev.recon3d.AppGraph
 import dev.recon3d.MSG_NO_SERVER
 import dev.recon3d.capture.CaptureScreen
 import dev.recon3d.capture.PreviewScreen
+import dev.recon3d.net.ApiException
 import dev.recon3d.rooms.CaptureRecord
+import dev.recon3d.rooms.DeleteDialog
+import dev.recon3d.rooms.DeleteMode
 import dev.recon3d.rooms.RoomListScreen
 import dev.recon3d.rooms.RoomScreen
+import dev.recon3d.rooms.captureDeleteBody
+import dev.recon3d.rooms.captureDeleteChoices
+import dev.recon3d.rooms.captureDeleteTitle
+import dev.recon3d.rooms.roomDeleteBody
+import dev.recon3d.rooms.roomDeleteChoices
+import dev.recon3d.rooms.roomDeleteTitle
+import dev.recon3d.upload.MSG_UNEXPECTED
 import dev.recon3d.settings.SettingsScreen
 import dev.recon3d.viewer.ViewerScreen
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import java.io.File
+
+/** What the delete dialog on the room screen is about. */
+private sealed interface DeleteTarget {
+    data class Capture(val id: String) : DeleteTarget
+    data object Room : DeleteTarget
+}
 
 object Routes {
     const val ROOMS = "rooms"
@@ -69,6 +88,25 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
         }
         composable(Routes.ROOM) { entry ->
             val roomId = entry.arguments?.getString("roomId") ?: return@composable
+            var pendingDelete by remember { mutableStateOf<DeleteTarget?>(null) }
+            var deleting by remember { mutableStateOf(false) }
+
+            /** Runs a delete, closes the dialog, toasts the Chinese reason on failure, then [onSuccess]. */
+            fun runDelete(block: suspend () -> Result<Unit>, onSuccess: () -> Unit = {}) {
+                scope.launch {
+                    deleting = true
+                    val result = block()
+                    deleting = false
+                    pendingDelete = null
+                    val e = result.exceptionOrNull()
+                    if (e != null) {
+                        Toast.makeText(context, (e as? ApiException)?.messageZh ?: MSG_UNEXPECTED, Toast.LENGTH_LONG).show()
+                    } else {
+                        onSuccess()
+                    }
+                }
+            }
+
             RoomScreen(
                 repo = graph.rooms,
                 roomId = roomId,
@@ -77,8 +115,54 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
                 onRetry = { id -> withServer { graph.uploader.retry(roomId, id) } },
                 onView = { id -> nav.navigate(Routes.viewer(roomId, id)) },
                 onViewPoints = { id -> nav.navigate(Routes.points(roomId, id)) },
+                onDeleteCapture = { id -> pendingDelete = DeleteTarget.Capture(id) },
+                onRedownload = { id -> withServer { graph.uploader.redownload(roomId, id) } },
+                onDeleteRoom = { pendingDelete = DeleteTarget.Room },
                 onBack = { nav.popBackStack() },
             )
+
+            when (val target = pendingDelete) {
+                null -> Unit
+                is DeleteTarget.Capture -> {
+                    val record = runCatching { graph.rooms.capture(roomId, target.id) }.getOrNull()
+                    if (record == null) {
+                        pendingDelete = null
+                    } else {
+                        val options = graph.deleter.captureOptions(record)
+                        DeleteDialog(
+                            title = captureDeleteTitle(record),
+                            body = captureDeleteBody(options),
+                            choices = captureDeleteChoices(options),
+                            busy = deleting,
+                            onChoose = { mode ->
+                                val go = { runDelete({ graph.deleter.deleteCapture(roomId, target.id, mode) }) }
+                                // A cloud delete needs the server address; a phone-only delete never does.
+                                if (mode == DeleteMode.CLOUD) withServer(go) else go()
+                            },
+                            onDismiss = { pendingDelete = null },
+                        )
+                    }
+                }
+                DeleteTarget.Room -> {
+                    val room = runCatching { graph.rooms.room(roomId) }.getOrNull()
+                    if (room == null) {
+                        pendingDelete = null
+                    } else {
+                        val options = graph.deleter.roomOptions(room)
+                        DeleteDialog(
+                            title = roomDeleteTitle(room),
+                            body = roomDeleteBody(room, options),
+                            choices = roomDeleteChoices(options),
+                            busy = deleting,
+                            onChoose = { mode ->
+                                val go = { runDelete({ graph.deleter.deleteRoom(roomId, mode) }, onSuccess = { nav.popBackStack() }) }
+                                if (mode == DeleteMode.CLOUD) withServer(go) else go()
+                            },
+                            onDismiss = { pendingDelete = null },
+                        )
+                    }
+                }
+            }
         }
         composable(Routes.SETTINGS) {
             SettingsScreen(settings = graph.settings, apiFor = graph::apiFor)
