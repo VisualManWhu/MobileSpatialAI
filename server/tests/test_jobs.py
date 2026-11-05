@@ -1,11 +1,21 @@
+import hashlib
 import io
+import json
+import threading
 import time
 
 import pytest
 import torch
 
 from recon3d.capture.format import CaptureFormatError
-from recon3d.jobs.store import JobStore, UploadTooLargeError
+from recon3d.jobs.store import (
+    ChecksumMismatch,
+    IncompleteUpload,
+    JobStore,
+    OffsetMismatch,
+    UploadBusy,
+    UploadTooLargeError,
+)
 from recon3d.jobs.worker import Worker
 
 
@@ -197,3 +207,140 @@ def test_list_newest_first_and_skips_junk_dirs(store):
     (store.jobs_dir / "deadbeef0000").mkdir()  # aborted upload leftover: no status.json
     (store.jobs_dir / ".DS_Store").write_bytes(b"")
     assert [s.job_id for s in store.list()] == [b, a]
+
+
+# --- resumable uploads (docs/superpowers/specs/2026-11-05-recon3d-resumable-transfer-design.md) ---
+
+
+def _rstore(tmp_path, **kw):
+    return JobStore(tmp_path / "data", **kw)
+
+
+def test_resumable_roundtrip(tmp_path):
+    s = _rstore(tmp_path)
+    data = b"abc" * 1000
+    info = s.begin_resumable(len(data), hashlib.sha256(data).hexdigest())
+    assert info.received == 0 and len(info.upload_id) == 12
+    assert s.append_resumable(info.upload_id, 0, [data[:1000]]) == 1000
+    assert s.resumable(info.upload_id).received == 1000
+    assert s.append_resumable(info.upload_id, 1000, [data[1000:]]) == 3000
+    jid = s.finish_resumable(info.upload_id)
+    assert jid == info.upload_id and s.get(jid).state == "queued"
+    assert (s.job_dir(jid) / "capture.zip").read_bytes() == data
+    assert not (s.job_dir(jid) / "upload.json").exists() and s.resumable(jid) is None
+    assert s.finish_resumable(jid) == jid  # idempotent
+    assert s.queue.get_nowait() == jid and s.queue.empty()
+
+
+def test_resumable_rejects_bad_begin(tmp_path):
+    s = _rstore(tmp_path, max_upload_bytes=10)
+    with pytest.raises(UploadTooLargeError):
+        s.begin_resumable(11, "0" * 64)
+    with pytest.raises(ValueError):
+        s.begin_resumable(0, "0" * 64)
+    with pytest.raises(ValueError):
+        s.begin_resumable(5, "xyz")
+
+
+def test_resumable_offset_mismatch_reports_received(tmp_path):
+    s = _rstore(tmp_path)
+    i = s.begin_resumable(10, "0" * 64)
+    s.append_resumable(i.upload_id, 0, [b"12345"])
+    with pytest.raises(OffsetMismatch) as e:
+        s.append_resumable(i.upload_id, 3, [b"x"])
+    assert e.value.received == 5
+
+
+def test_resumable_partial_iterable_keeps_bytes(tmp_path):
+    s = _rstore(tmp_path)
+    i = s.begin_resumable(10, "0" * 64)
+
+    def chunks():
+        yield b"1234"
+        raise ConnectionError
+
+    with pytest.raises(ConnectionError):
+        s.append_resumable(i.upload_id, 0, chunks())
+    assert s.resumable(i.upload_id).received == 4
+
+
+def test_resumable_over_declared_size_deletes(tmp_path):
+    s = _rstore(tmp_path)
+    i = s.begin_resumable(4, "0" * 64)
+    with pytest.raises(UploadTooLargeError):
+        s.append_resumable(i.upload_id, 0, [b"12345"])
+    assert s.resumable(i.upload_id) is None and not s.job_dir(i.upload_id).exists()
+
+
+def test_resumable_finish_incomplete_and_checksum(tmp_path):
+    s = _rstore(tmp_path)
+    i = s.begin_resumable(4, "0" * 64)
+    s.append_resumable(i.upload_id, 0, [b"12"])
+    with pytest.raises(IncompleteUpload) as e:
+        s.finish_resumable(i.upload_id)
+    assert e.value.received == 2
+    s.append_resumable(i.upload_id, 2, [b"34"])
+    with pytest.raises(ChecksumMismatch):
+        s.finish_resumable(i.upload_id)
+    assert not s.job_dir(i.upload_id).exists()
+
+
+def test_resumable_busy(tmp_path):
+    s = _rstore(tmp_path)
+    i = s.begin_resumable(10, "0" * 64)
+    started, release = threading.Event(), threading.Event()
+
+    def slow():
+        yield b"1"
+        started.set()
+        release.wait(5)
+        yield b"2"
+
+    t = threading.Thread(target=lambda: s.append_resumable(i.upload_id, 0, slow()))
+    t.start()
+    assert started.wait(5)
+    with pytest.raises(UploadBusy) as e:
+        s.append_resumable(i.upload_id, 1, [b"x"])
+    assert e.value.received == 1
+    release.set()
+    t.join(5)
+    assert s.resumable(i.upload_id).received == 2
+
+
+def test_sweep_and_startup_correct_received_from_part_size(tmp_path):
+    s = _rstore(tmp_path)
+    old = s.begin_resumable(10, "0" * 64)
+    fresh = s.begin_resumable(10, "0" * 64)
+    meta = s.job_dir(old.upload_id) / "upload.json"
+    j = json.loads(meta.read_text(encoding="utf-8"))
+    j["updated_at"] -= 90000
+    meta.write_text(json.dumps(j), encoding="utf-8")
+    # A crash after bytes landed but before upload.json was updated.
+    (s.job_dir(fresh.upload_id) / "capture.zip.part").write_bytes(b"123")
+    assert s.sweep_resumable() == 1
+    assert s.resumable(old.upload_id) is None and not s.job_dir(old.upload_id).exists()
+    s.recover_after_restart()
+    assert s.resumable(fresh.upload_id).received == 3
+
+
+def test_sweep_skips_upload_being_received(tmp_path):
+    s = _rstore(tmp_path)
+    i = s.begin_resumable(10, "0" * 64)
+    meta = s.job_dir(i.upload_id) / "upload.json"
+    j = json.loads(meta.read_text(encoding="utf-8"))
+    j["updated_at"] -= 90000
+    meta.write_text(json.dumps(j), encoding="utf-8")
+    started, release = threading.Event(), threading.Event()
+
+    def slow():
+        yield b"1"
+        started.set()
+        release.wait(5)
+
+    t = threading.Thread(target=lambda: s.append_resumable(i.upload_id, 0, slow()))
+    t.start()
+    assert started.wait(5)
+    assert s.sweep_resumable() == 0
+    release.set()
+    t.join(5)
+    assert s.resumable(i.upload_id).received == 1
