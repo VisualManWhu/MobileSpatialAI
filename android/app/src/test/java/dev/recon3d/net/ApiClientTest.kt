@@ -355,4 +355,29 @@ class ApiClientTest {
         assertEquals("任务尚未完成", apiError { client.downloadScene("abc", dest) }.messageZh)
         assertFalse(dest.exists())
     }
+
+    // --- deleteJob (docs/superpowers/specs/2026-11-05-recon3d-delete-design.md) ---
+
+    @Test fun deleteJobReturnsOn204And404() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(204))
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"detail":"任务不存在"}"""))
+        client.deleteJob("abc123abc123")
+        client.deleteJob("abc123abc123")
+        val req = server.takeRequest()
+        assertEquals("DELETE", req.method)
+        assertEquals("/api/v1/jobs/abc123abc123", req.path)
+    }
+
+    @Test fun deleteJob409SurfacesDetailAndCode() = runBlocking {
+        server.enqueue(MockResponse().setResponseCode(409).setBody("""{"detail":"任务正在训练，完成后再删"}"""))
+        val e = assertThrows(ApiException::class.java) { runBlocking { client.deleteJob("abc123abc123") } }
+        assertEquals("任务正在训练，完成后再删", e.messageZh)
+        assertEquals(409, e.code)
+    }
+
+    @Test fun deleteJobTransportErrorIsUnreachable() = runBlocking {
+        server.shutdown()
+        val e = assertThrows(ApiException::class.java) { runBlocking { client.deleteJob("abc123abc123") } }
+        assertEquals(ApiClient.MSG_UNREACHABLE, e.messageZh)
+    }
 }

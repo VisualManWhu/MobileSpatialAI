@@ -93,6 +93,9 @@ open class RoomRepository(
         room.copy(captures = room.captures.filterNot { it.id == captureId })
     }
 
+    /** Removes the room and its records (the caller deletes files). No-op if absent. */
+    fun removeRoom(roomId: String) = mutate { rooms -> rooms.filterNot { it.id == roomId } }
+
     fun capture(roomId: String, captureId: String): CaptureRecord =
         room(roomId).captures.firstOrNull { it.id == captureId }
             ?: throw NoSuchElementException("no capture $captureId in $roomId")

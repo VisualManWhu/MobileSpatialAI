@@ -83,6 +83,16 @@ private class FakeApi : Api {
     /** Whether a stale scene.splat.part existed when downloadScene was called. */
     var partExistedAtDownload: Boolean? = null
 
+    /** Ids passed to deleteJob, in order. */
+    val deletedJobs = mutableListOf<String>()
+    /** Per-call scripted outcome: null = success (204/404), an exception = thrown. Empty = success. */
+    val deleteResponses = ArrayDeque<ApiException?>()
+
+    override suspend fun deleteJob(jobId: String) {
+        deletedJobs += jobId
+        deleteResponses.removeFirstOrNull()?.let { throw it }
+    }
+
     override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) {
         partExistedAtDownload = File(dest.path + ".part").exists()
         downloadRetrySteps.forEach(onRetry)

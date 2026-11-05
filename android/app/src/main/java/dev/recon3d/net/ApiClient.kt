@@ -65,6 +65,12 @@ interface Api {
      * wait, and 0 once a retried request gets through again.
      */
     suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit = {})
+
+    /**
+     * Deletes the server job (or in-progress upload) [jobId]. Returns normally on 204 and on 404
+     * (already gone); a 409 surfaces as [ApiException] with the server's detail and `code = 409`.
+     */
+    suspend fun deleteJob(jobId: String)
 }
 
 /**
@@ -190,6 +196,22 @@ class ApiClient(
 
     override suspend fun job(id: String): JobStatus =
         call(get("jobs", id)) { decode<JobStatus>(it.body!!.string()) }
+
+    override suspend fun deleteJob(jobId: String) {
+        val request = Request.Builder().url(url("jobs", jobId)).delete().build()
+        withContext(Dispatchers.IO) {
+            try {
+                http.newCall(request).await().use { response ->
+                    if (response.code != 404 && !response.isSuccessful) throw httpError(response)
+                }
+            } catch (e: ApiException) {
+                throw e
+            } catch (e: IOException) {
+                Log.w(TAG, "request failed: DELETE ${request.url}", e)
+                throw ApiException(MSG_UNREACHABLE, e)
+            }
+        }
+    }
 
     override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) {
         dest.absoluteFile.parentFile?.mkdirs()

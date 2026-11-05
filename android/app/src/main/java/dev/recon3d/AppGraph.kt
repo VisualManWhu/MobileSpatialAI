@@ -51,4 +51,5 @@ private class SettingsBackedApi(private val settings: ServerSettings) : Api {
     override suspend fun job(id: String): JobStatus = client().job(id)
     override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) =
         client().downloadScene(id, dest, onRetry)
+    override suspend fun deleteJob(jobId: String) = client().deleteJob(jobId)
 }

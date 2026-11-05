@@ -85,4 +85,12 @@ class RoomRepositoryTest {
         assertTrue(RoomRepository(dir).roomsNow().isEmpty())
         assertTrue(dir.listFiles()!!.any { it.name.startsWith("rooms.json.corrupt") })
     }
+
+    @Test fun removeRoomDropsItAndPersists() {
+        val a = repo.createRoom("a")
+        val b = repo.createRoom("b")
+        repo.removeRoom(a.id)
+        repo.removeRoom("room-missing") // no-op
+        assertEquals(listOf(b.id), RoomRepository(dir).roomsNow().map { it.id })
+    }
 }
