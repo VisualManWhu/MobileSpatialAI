@@ -33,6 +33,9 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
           "created_at":1793628538.96,"capture_bytes":71075878,"has_scene":true}]}
 ```
 
+正在接收的断点续传上传排在最前面，`state` 为 `uploading`，`progress` = 已收/总大小，
+`message` 为 `已收到 n / size 字节`，`capture_bytes` 是声明的总大小。finish 后变成普通任务。
+
 ## GET /jobs/{id}
 
 ```json

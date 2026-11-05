@@ -69,8 +69,22 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
 
     @api.get("/jobs")
     def list_jobs():
-        """Every job, newest first, for the status page (not used by the phone)."""
+        """Every job, newest first, for the status page (not used by the phone).
+
+        Uploads still being received are listed first as state "uploading" so the page shows a
+        transfer the moment the phone starts it, not only once it becomes a queued job.
+        """
         out = []
+        for u in store.list_resumable():
+            out.append({
+                "job_id": u.upload_id,
+                "state": "uploading",
+                "progress": u.received / u.size,
+                "message": f"已收到 {u.received} / {u.size} 字节",
+                "created_at": u.created_at,
+                "capture_bytes": u.size,
+                "has_scene": False,
+            })
         for s in store.list():
             d = store.job_dir(s.job_id)
             try:

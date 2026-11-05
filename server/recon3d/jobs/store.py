@@ -218,6 +218,11 @@ class JobStore:
             return None
         return ResumableInfo(upload_id=upload_id, **{**raw, "received": self._part_size(upload_id)})
 
+    def list_resumable(self) -> list[ResumableInfo]:
+        """Every upload still being received, newest first (finished ones are jobs, see list())."""
+        found = [i for d in self.jobs_dir.iterdir() if (i := self.resumable(d.name)) is not None]
+        return sorted(found, key=lambda i: i.created_at, reverse=True)
+
     def append_resumable(self, upload_id: str, offset: int, chunks: Iterable[bytes]) -> int:
         """Write `chunks` at `offset` (which must equal the bytes already received); returns the new count.
 

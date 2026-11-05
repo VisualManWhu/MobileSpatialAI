@@ -368,3 +368,18 @@ def test_finish_waiting_behind_another_finish_is_idempotent(tmp_path):
     lock.release()
     t.join(5)
     assert result["second"] == i.upload_id
+
+
+def test_list_resumable_newest_first_excludes_finished(tmp_path):
+    s = _rstore(tmp_path)
+    data = b"q" * 300
+    a = s.begin_resumable(300, hashlib.sha256(data).hexdigest())
+    time.sleep(0.01)
+    b = s.begin_resumable(300, hashlib.sha256(data).hexdigest())
+    s.append_resumable(a.upload_id, 0, [data[:100]])
+    done = s.begin_resumable(300, hashlib.sha256(data).hexdigest())
+    s.append_resumable(done.upload_id, 0, [data])
+    s.finish_resumable(done.upload_id)
+    got = s.list_resumable()
+    assert [i.upload_id for i in got] == [b.upload_id, a.upload_id]
+    assert got[1].received == 100

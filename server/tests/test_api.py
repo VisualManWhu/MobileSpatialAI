@@ -195,6 +195,21 @@ def test_list_jobs(client):
     assert isinstance(j["created_at"], float)
 
 
+def test_list_jobs_includes_uploads_in_progress(client):
+    data = b"u" * 4000
+    uid = _begin(client, data)
+    _put(client, uid, 0, data[:1000])
+    jobs = client.get("/api/v1/jobs").json()["jobs"]
+    assert len(jobs) == 1
+    j = jobs[0]
+    assert j["job_id"] == uid and j["state"] == "uploading" and j["progress"] == 0.25
+    assert j["capture_bytes"] == 4000 and j["has_scene"] is False
+    assert j["message"] == "已收到 1000 / 4000 字节"
+    _put(client, uid, 1000, data[1000:])
+    client.post(f"/api/v1/uploads/{uid}/finish")
+    assert all(x["state"] != "uploading" for x in client.get("/api/v1/jobs").json()["jobs"])
+
+
 def test_status_page_is_html(client):
     r = client.get("/")
     assert r.status_code == 200

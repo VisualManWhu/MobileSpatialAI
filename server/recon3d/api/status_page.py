@@ -15,6 +15,7 @@ HTML = """<!doctype html>
   th { background: #fafafa; font-weight: 600; }
   .bar { height: 8px; background: #e5e5e5; border-radius: 4px; overflow: hidden; width: 160px; }
   .bar i { display: block; height: 100%; background: #2e7dff; }
+  .uploading .bar i { background: #f0a020; }
   .done .bar i { background: #3cb371; }
   .failed .bar i { background: #e33; }
   .failed td.msg { color: #c00; }
@@ -31,7 +32,7 @@ HTML = """<!doctype html>
 </table>
 <div id="empty" hidden>还没有任务。手机上传拍摄包后会出现在这里。</div>
 <script>
-const STATE = { queued: "排队中", training: "训练中", exporting: "导出中", done: "完成", failed: "失败" };
+const STATE = { uploading: "上传中", queued: "排队中", training: "训练中", exporting: "导出中", done: "完成", failed: "失败" };
 function fmtBytes(n) {
   if (n >= 1024 ** 3) return (n / 1024 ** 3).toFixed(2) + " GB";
   if (n >= 1024 ** 2) return (n / 1024 ** 2).toFixed(1) + " MB";
