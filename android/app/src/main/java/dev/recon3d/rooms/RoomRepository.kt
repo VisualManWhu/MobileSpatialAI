@@ -34,6 +34,12 @@ data class CaptureRecord(
     val jobId: String? = null,
     /** Server upload id while `uploading` (resumable protocol); kept on transport failure so retry continues. */
     val uploadId: String? = null,
+    /**
+     * Every server id this capture ever had (upload ids and job ids, same namespace), never cleared:
+     * a failed job drops [jobId] so retry re-uploads, but its directory stays on the server until
+     * "彻底删除" removes each of these.
+     */
+    val serverIds: List<String> = emptyList(),
     val state: String = "local",
     /** 0..1: upload fraction while `uploading`, server progress afterwards. */
     val progress: Float = 0f,

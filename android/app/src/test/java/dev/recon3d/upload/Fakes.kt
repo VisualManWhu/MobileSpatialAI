@@ -43,13 +43,17 @@ internal class FakeApi : Api {
     /** Retry attempts replayed through downloadScene's onRetry. */
     var downloadRetrySteps: List<Int> = emptyList()
 
+    /** When true, onCreated fires only after [uploadDelayMs]: the record has no ids while the upload is stuck at start. */
+    var createdLate = false
+
     override suspend fun upload(zip: File, uploadId: String?, listener: UploadListener): String {
         uploads++
         lastUploadId = uploadId
-        if (uploadId == null) listener.onCreated("u1")
+        if (uploadId == null && !createdLate) listener.onCreated("u1")
         uploadFailure?.let { uploadFailure = null; throw it }
         retrySteps.forEach(listener::onRetry)
         if (uploadDelayMs > 0) delay(uploadDelayMs)  // suspends between the retries and the progress
+        if (uploadId == null && createdLate) listener.onCreated("u1")
         progressSteps.forEach(listener::onProgress)
         return "j"
     }

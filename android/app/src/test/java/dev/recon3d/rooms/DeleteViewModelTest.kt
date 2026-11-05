@@ -2,6 +2,8 @@ package dev.recon3d.rooms
 
 import dev.recon3d.net.ApiClient
 import dev.recon3d.net.ApiException
+import dev.recon3d.net.JobState
+import dev.recon3d.net.JobStatus
 import dev.recon3d.upload.FakeApi
 import dev.recon3d.upload.InstrumentedRepo
 import dev.recon3d.upload.UploadViewModel
@@ -204,5 +206,60 @@ class DeleteViewModelTest {
         val r = vm().deleteRoom(room, DeleteMode.LOCAL)
         assertEquals(DeleteViewModel.MSG_ROOM_ACTIVE, messageOf(r))
         assertEquals(1, repo.roomsNow().size)
+    }
+
+    // --- review fix pass ---
+
+    @Test fun cloudDelete409OnTrainingResumesPolling() = runTest {
+        repo.editCapture(room, cap) { it.copy(state = "training", jobId = "j", progress = 0.4f) }
+        api.jobResult = JobStatus("j", JobState.TRAINING, 0.5f, "训练中")
+        val up = uploader()
+        up.retry(room, cap); advanceTimeBy(500)
+        assertTrue(up.isRunning(room, cap))
+        val pollsBefore = api.polls
+        api.deleteResponses += ApiException("任务正在训练，完成后再删", code = 409)
+        val r = vm(up).deleteCapture(room, cap, DeleteMode.CLOUD)
+        assertEquals("任务正在训练，完成后再删", messageOf(r))
+        assertTrue(up.isRunning(room, cap))
+        advanceTimeBy(10_000)
+        assertTrue(api.polls > pollsBefore)
+        assertEquals("training", repo.capture(room, cap).state)
+        up.cancel(room, cap)
+    }
+
+    @Test fun cloudDeleteFailureOnUploadingResumesUpload() = runTest {
+        api.uploadDelayMs = 60_000
+        val up = uploader()
+        up.start(room, cap); advanceTimeBy(500)
+        repeat(6) { api.deleteResponses += ApiException(ApiClient.MSG_BUSY, code = 409) }
+        assertTrue(vm(up).deleteCapture(room, cap, DeleteMode.CLOUD).isFailure)
+        assertTrue(up.isRunning(room, cap))
+        advanceTimeBy(100) // let the relaunched coroutine reach the API
+        assertEquals(2, api.uploads) // the cancelled upload was started again
+        assertEquals("u1", api.lastUploadId) // and continues from the recorded upload id
+        up.cancel(room, cap)
+    }
+
+    @Test fun uploadingWithoutIdsYetIsCloudOnlyAndGetsCancelled() = runTest {
+        api.createdLate = true
+        api.uploadDelayMs = 60_000
+        val up = uploader()
+        up.start(room, cap); advanceTimeBy(500)
+        val rec = repo.capture(room, cap)
+        assertEquals("uploading", rec.state); assertNull(rec.uploadId); assertNull(rec.jobId)
+        assertEquals(listOf(DeleteMode.CLOUD), vm(up).captureOptions(rec))
+        assertTrue(vm(up).deleteCapture(room, cap, DeleteMode.CLOUD).isSuccess)
+        assertFalse(up.isRunning(room, cap))
+        assertEquals(0, api.deletedJobs.size)
+        assertFalse(zip.exists()); assertTrue(repo.room(room).captures.isEmpty())
+    }
+
+    @Test fun cloudDeleteRemovesEveryServerIdEvenWhenJobIdWasCleared() = runTest {
+        repo.editCapture(room, cap) { it.copy(state = "failed", jobId = null, uploadId = null, serverIds = listOf("old1", "old2")) }
+        val rec = repo.capture(room, cap)
+        assertEquals(listOf(DeleteMode.CLOUD), vm().captureOptions(rec))
+        assertTrue(vm().deleteCapture(room, cap, DeleteMode.CLOUD).isSuccess)
+        assertEquals(listOf("old1", "old2"), api.deletedJobs)
+        assertTrue(repo.room(room).captures.isEmpty())
     }
 }

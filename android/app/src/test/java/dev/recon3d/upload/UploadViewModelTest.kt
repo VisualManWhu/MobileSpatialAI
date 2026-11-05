@@ -427,4 +427,16 @@ class UploadViewModelTest {
         assertEquals(0, api.polls)
         assertEquals("remote", repo.capture(room, cap).state)
     }
+
+    @Test fun serverIdsAccumulateAcrossFailureAndReupload() = runTest {
+        val vm = vm()
+        api.jobQueue += JobStatus("j", JobState.FAILED, 0f, "重建失败")
+        vm.start(room, cap); advanceUntilIdle()
+        val failed = repo.capture(room, cap)
+        assertEquals("failed", failed.state); assertNull(failed.jobId)
+        assertEquals(listOf("u1", "j"), failed.serverIds)
+        vm.retry(room, cap); advanceUntilIdle()
+        assertEquals("done", repo.capture(room, cap).state)
+        assertEquals(listOf("u1", "j"), repo.capture(room, cap).serverIds) // same ids again: no duplicates
+    }
 }

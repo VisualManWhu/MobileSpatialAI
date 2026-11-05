@@ -148,6 +148,18 @@ class UploadViewModel(
         }
     }
 
+    /**
+     * Restarts the transfer a [cancel] stopped when the delete that followed it failed: an upload
+     * continues from its recorded id (or from scratch), an active job is polled again. No-op otherwise.
+     */
+    fun resume(roomId: String, captureId: String) {
+        val rec = repo.capture(roomId, captureId)
+        when {
+            rec.state == "uploading" -> start(roomId, captureId)
+            rec.state in ACTIVE && rec.jobId != null -> retry(roomId, captureId)
+        }
+    }
+
     private fun launchOnce(roomId: String, captureId: String, block: suspend () -> Unit) {
         val key = "$roomId/$captureId"
         synchronized(running) {
@@ -197,7 +209,8 @@ class UploadViewModel(
             }
         }
         val jobId = api.upload(zip, resumeId, object : UploadListener {
-            override fun onCreated(uploadId: String) = record("upload id") { it.copy(uploadId = uploadId, progress = 0f) }
+            override fun onCreated(uploadId: String) =
+                record("upload id") { it.copy(uploadId = uploadId, progress = 0f, serverIds = it.serverIds.plusDistinct(uploadId)) }
 
             override fun onRetry(attempt: Int) {
                 reconnecting = true
@@ -214,7 +227,7 @@ class UploadViewModel(
             }
         })
         repo.editCapture(roomId, captureId) {
-            it.copy(state = "queued", jobId = jobId, uploadId = null, progress = 0f, message = null)
+            it.copy(state = "queued", jobId = jobId, serverIds = it.serverIds.plusDistinct(jobId), uploadId = null, progress = 0f, message = null)
         }
         return jobId
     }
@@ -303,6 +316,8 @@ class UploadViewModel(
         val MAX_BACKOFF = 30.seconds
     }
 }
+
+private fun List<String>.plusDistinct(id: String): List<String> = if (id in this) this else this + id
 
 /** Chinese status line for a capture row, e.g. `训练中 42%` or `失败：<原因>`. */
 fun captureStatusText(record: CaptureRecord): String {

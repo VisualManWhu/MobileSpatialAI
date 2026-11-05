@@ -32,26 +32,39 @@ class DeleteViewModel(
 ) {
     /** Dialog choices for a capture, in display order. */
     fun captureOptions(record: CaptureRecord): List<DeleteMode> = when {
-        record.jobId == null && record.uploadId == null -> listOf(DeleteMode.LOCAL)
+        neverUploaded(record) -> listOf(DeleteMode.LOCAL)
         record.state == "done" && record.scenePath != null -> listOf(DeleteMode.CLOUD, DeleteMode.LOCAL)
         else -> listOf(DeleteMode.CLOUD)
     }
+
+    /** No server id ever, and not in the middle of getting one (an upload stuck before POST /uploads has none yet). */
+    private fun neverUploaded(record: CaptureRecord): Boolean =
+        record.serverIds.isEmpty() && record.jobId == null && record.uploadId == null && record.state != "uploading"
 
     /** Dialog choices for a room, in display order. */
     fun roomOptions(room: Room): List<DeleteMode> =
         if (room.captures.isEmpty()) listOf(DeleteMode.LOCAL) else listOf(DeleteMode.CLOUD, DeleteMode.LOCAL)
 
     suspend fun deleteCapture(roomId: String, captureId: String, mode: DeleteMode): Result<Unit> = guarded {
+        // Stop any transfer first, then read the record: the joined coroutine may have written an id.
+        val wasRunning = uploader.isRunning(roomId, captureId)
+        uploader.cancel(roomId, captureId)
         val rec = repo.capture(roomId, captureId)
         when (mode) {
             DeleteMode.CLOUD -> {
-                uploader.cancel(roomId, captureId)
-                (rec.jobId ?: rec.uploadId)?.let { deleteOnServer(it) }
+                val ids = (rec.serverIds + listOfNotNull(rec.jobId, rec.uploadId)).distinct()
+                try {
+                    ids.forEach { deleteOnServer(it) }
+                } catch (e: Exception) {
+                    // The server said no (or is unreachable): the record stays, so the transfer it had goes on.
+                    if (wasRunning) uploader.resume(roomId, captureId)
+                    throw e
+                }
                 deleteLocalFiles(roomId, rec)
                 repo.removeCapture(roomId, captureId)
             }
             DeleteMode.LOCAL -> {
-                if (rec.jobId == null && rec.uploadId == null) {
+                if (neverUploaded(rec)) {
                     deleteLocalFiles(roomId, rec)
                     repo.removeCapture(roomId, captureId)
                 } else {

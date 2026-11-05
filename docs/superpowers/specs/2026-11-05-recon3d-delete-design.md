@@ -56,7 +56,7 @@
 
 | 情形 | 按钮 |
 |---|---|
-| 拍摄从未上传（`jobId == null && uploadId == null`） | 「删除」（= 删手机）、「取消」 |
+| 拍摄从未上传（`serverIds` 为空、无 `jobId`/`uploadId`、且不在 `uploading`） | 「删除」（= 删手机）、「取消」 |
 | 拍摄 `done` 且 `scenePath != null` | 「彻底删除」「仅删手机文件」「取消」 |
 | 拍摄其他状态（uploading / queued / failed / 仅云端） | 「彻底删除」「取消」 |
 | 房间无拍摄 | 「删除」「取消」 |
@@ -68,8 +68,8 @@
 ### 4.2 语义
 
 **拍摄 · 彻底删除**
-1. 若正在上传 / 轮询 / 下载（`uploader.isRunning`）：`UploadViewModel.cancel(roomId, captureId)`（suspend，`cancelAndJoin`），等协程结束。
-2. 若 `jobId ?: uploadId` 非空：`DELETE /jobs/{id}`。`204` 或 `404` 继续；`409` 且 detail 为"该上传正在接收中"→ 隔 1 s 重试，最多 5 次（服务端察觉断线后才放锁），仍 409 才中止；其他 `409` 抛 `ApiException(detail)` 中止，记录原样不动；网络错误同样中止（"连不上计算端"）。
+1. 若正在上传 / 轮询 / 下载（`uploader.isRunning`）：`UploadViewModel.cancel(roomId, captureId)`（suspend，`cancelAndJoin`），等协程结束；之后再读记录（协程结束前可能刚写入 id）。
+2. 对 `serverIds ∪ {jobId, uploadId}` 的每个 id：`DELETE /jobs/{id}`。任一失败而中止时，若第 1 步停掉了传输，`UploadViewModel.resume` 把它重新拉起（上传接着传、任务接着轮询），行不会卡死。`204` 或 `404` 继续；`409` 且 detail 为"该上传正在接收中"→ 隔 1 s 重试，最多 5 次（服务端察觉断线后才放锁），仍 409 才中止；其他 `409` 抛 `ApiException(detail)` 中止，记录原样不动；网络错误同样中止（"连不上计算端"）。
 3. 云端 `204` 之后的本地步骤不会失败：文件删不掉忽略，`removeCapture` 对不存在的记录是 no-op。
 4. 删本地文件：`zipPath`、`pointsPath`、`scenePath` 及其 `.part`、`scenesDir/<roomId>/<captureId>/` 目录。
 5. `repo.removeCapture`。
@@ -93,7 +93,7 @@
 
 ### 4.3 代码落点
 
-- `rooms/RoomRepository.kt`：`removeRoom(roomId)`；`CaptureRecord.state` 新值 `"remote"`。
+- `rooms/RoomRepository.kt`：`removeRoom(roomId)`；`CaptureRecord.state` 新值 `"remote"`；`CaptureRecord.serverIds: List<String>`——这条拍摄历来拿到过的所有服务端 id（上传 id 与任务 id 同一命名空间），只增不删：任务失败时 `jobId` 会被清掉以便重传，但服务端目录还在，"彻底删除"要把这些 id 全删一遍（404 忽略）。
 - `upload/UploadScreen.kt`（`UploadViewModel`）：`cancel()`、`redownload()`；`captureStatusText` 加 `"remote" -> "仅云端"`；`CaptureRow` 加 ⋮ 与「重新下载」按钮；`resumeInterrupted` 对 `remote` 不做事。
 - 新文件 `rooms/DeleteViewModel.kt`（纯 JVM，可测）：`deleteCapture(roomId, captureId, mode)`、`deleteRoom(roomId, mode)`，`mode ∈ { CLOUD, LOCAL }`，依赖 `Api.deleteJob(id)`、`RoomRepository`、`UploadViewModel`（取消用）、`filesDir`、`scenesDir`。返回 `Result<Unit>`，失败消息中文。
 - `net/ApiClient.kt`：`Api.deleteJob(jobId: String)`：`204`/`404` 返回，`409` 抛 `ApiException(detail, code = 409)`，其余沿用现有 `httpError`。
@@ -142,4 +142,5 @@
 - "仅云端"是新状态 `remote` 而不是复用 `done` + 空 scenePath：状态文案和按钮判断都靠 state，塞进 done 会让所有 `state == "done"` 的判断多一个分支。
 - 房间彻底删除的训练预检只看本地状态：手机每 3 s 轮询，与服务端最多差一次轮询；真撞上服务端 409 也会在逐条删时被拦住。
 - 删除本地文件失败（极少见）不算失败：`File.delete()` 返回 false 就忽略，记录照常处理，避免用户卡在删不掉。
+- 代码评审后补的：失败任务的服务端目录靠 `serverIds` 找回来删（否则 §1 说的"失败任务只能手动 rm"没解决）；云端删除失败时恢复被取消的传输；上传刚开始、还没拿到 id 的拍摄只给"彻底删除"。
 - 评审者提出、我拍板的：上传锁 409 短暂重试而不是直接报错；房间"仅删手机"遇到进行中的任务拒绝而不是把云端任务变成孤儿；本地删除前先算好查看器机位；下载中的拍摄不算"训练中"。
