@@ -7,6 +7,7 @@ import dev.recon3d.net.ApiException
 import dev.recon3d.net.Health
 import dev.recon3d.net.JobStatus
 import dev.recon3d.net.UploadListener
+import dev.recon3d.rooms.DeleteViewModel
 import dev.recon3d.rooms.RoomRepository
 import dev.recon3d.settings.ServerSettings
 import dev.recon3d.upload.UploadViewModel
@@ -29,6 +30,13 @@ class AppGraph private constructor(context: Context) {
         repo = rooms,
         scenesDir = File(app.filesDir, "rooms"),
     ).also { it.resumeInterrupted() }
+    val deleter = DeleteViewModel(
+        api = SettingsBackedApi(settings),
+        repo = rooms,
+        uploader = uploader,
+        capturesDir = File(app.filesDir, "captures"),
+        scenesDir = File(app.filesDir, "rooms"),
+    )
 
     fun apiFor(baseUrl: String): Api = ApiClient(baseUrl)
 
