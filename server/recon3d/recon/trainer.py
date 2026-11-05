@@ -307,6 +307,21 @@ def _cull_outside(params, optimizers, state, bounds: SceneBounds | None) -> int:
     return n
 
 
+def _cull_huge(params, optimizers, state, max_scale_m: float) -> int:
+    """Remove Gaussians whose largest axis (exp(log scale)) exceeds max_scale_m; 0 disables. Returns the count.
+
+    A single Gaussian that grew to cover a whole off-trajectory view is a floater the centre-based
+    statistics never count; real geometry at the training resolution never needs a metre-sized primitive.
+    """
+    if max_scale_m <= 0:
+        return 0
+    huge = torch.exp(params["scales"]).max(dim=1).values > max_scale_m
+    if not huge.any():
+        return 0
+    n, _ = _remove_masked(params, optimizers, state, huge, keep=False)
+    return n
+
+
 def _slice(params, mask: torch.Tensor) -> Splats:
     """The masked Gaussians as a detached Splats on the CPU (masked indexing already copies)."""
     return Splats(**{k: params[k][mask].detach().cpu() for k in Splats.__dataclass_fields__})
@@ -403,6 +418,7 @@ def train(
         support_xyz=cloud[0], support_far_m=profile.support_far_m, support_dist_m=profile.support_dist_m,
     )
     culled = 0
+    huge_culled = 0
     use_contrib = profile.contrib_min_views > 0 or profile.contrib_min_px > 0
     contrib_steps = {iters // 2, 3 * iters // 4} if use_contrib else set()
     pruned: list[Splats] = []
@@ -452,6 +468,7 @@ def train(
         # cap_max bounds the count, so _enforce_cap is not needed; MCMC has no opacity reset.
         strategy = MCMCStrategy(
             cap_max=profile.max_gaussians,
+            noise_lr=profile.mcmc_noise_lr,
             refine_start_iter=min(500, iters // 10),
             refine_stop_iter=iters // 2,
             refine_every=100,
@@ -587,6 +604,7 @@ def train(
         # Floaters that densified or drifted out of the room go at the strategy's cadence.
         if step > 0 and step % strategy.refine_every == 0:
             culled += _cull_outside(params, optimizers, rm_state, bounds)
+            huge_culled += _cull_huge(params, optimizers, rm_state, profile.max_scale_m)
         if step in contrib_steps:
             _contrib(step)
         if not mcmc:
@@ -609,6 +627,9 @@ def train(
     if use_contrib:
         _contrib(iters)
     culled += _cull_outside(params, optimizers, rm_state, bounds)
+    huge_culled += _cull_huge(params, optimizers, rm_state, profile.max_scale_m)
+    if profile.max_scale_m > 0:
+        log.info("超大高斯裁剪（最长轴 > %.2f m）：训练中共移除 %d 个", profile.max_scale_m, huge_culled)
     if profile.sor_sigma > 0:
         n, removed = _prune_sor(params, optimizers, rm_state, profile.sor_sigma, keep=pruned_out is not None)
         if removed is not None:

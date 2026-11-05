@@ -61,6 +61,18 @@ class Profile:
     # floater score 0.375 -> 0.116, indoor 5cba 23.59 -> 24.30 dB and opaque floaters 57.6k -> 16.2k
     # (docs/acceptance/phase1.md section 5).
     strategy: str = "mcmc"
+    # MCMC position noise scale (gsplat MCMCStrategy noise_lr; the noise is noise_lr * current means lr, so it
+    # already decays 100x over training with the means schedule). gsplat's default is 5e5. Evidence
+    # (docs/acceptance/phase1.md section 5, conclusion 10): 5e4 and 1e4 both cut the opaque Gaussians > 0.3 m
+    # from the depth cloud (indoor 4.1k -> 2.6k -> 1.3k, outdoor 10.5k -> 4.6k -> 1.5k) and 1e4 is the only
+    # setting whose outdoor off-trajectory renders lose the metre-sized near-camera blob; it costs outdoor
+    # training-view PSNR -0.44 dB (indoor -0.06), the same kind of trade as the mono prior.
+    mcmc_noise_lr: float = 1e4
+    # Gaussians whose largest axis exceeds max_scale_m are removed with the bounds culling (0 = off): one
+    # metre-sized primitive parked just off the trajectory covers a whole off-trajectory view and the
+    # centre-based floater statistics never see it. Opt-in: at 0.5 m with noise 5e4 the blob simply
+    # re-formed in another off-trajectory frame (conclusion 10), so it treats the symptom only.
+    max_scale_m: float = 0.0
     # Per-frame affine colour correction (recon/appearance.py), opt-in (appearance_lr = 0 turns it off):
     # each training frame learns rgb' = A rgb + b (A = I, b = 0 at start) applied to the render before
     # the photometric loss, so AE/AWB drift between frames is not fitted with semi-transparent blobs.

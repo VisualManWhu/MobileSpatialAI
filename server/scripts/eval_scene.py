@@ -41,7 +41,7 @@ WORST_K = 5
 TRAIN_SETTINGS = (
     "depth_lambda", "pose_lr", "strategy", "far_m", "bbox_margin_m", "support_far_m", "support_dist_m", "contrib_min_views",
     "contrib_min_px", "contrib_view_px", "sor_sigma", "opacity_reg", "scale_reg", "appearance_lr", "appearance_reg",
-    "mono_lambda", "mono_lambda_end", "mono_patch",
+    "mono_lambda", "mono_lambda_end", "mono_patch", "mcmc_noise_lr", "max_scale_m",
 )
 
 
@@ -168,6 +168,8 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack
         "mono_lambda": profile.mono_lambda,
         "mono_lambda_end": profile.mono_lambda_end,
         "mono_patch": profile.mono_patch,
+        "mcmc_noise_lr": profile.mcmc_noise_lr,
+        "max_scale_m": profile.max_scale_m,
         "views": int(len(psnr)),
         "psnr_median": float(np.median(psnr)),
         "psnr_matched_median": float(np.median(psnr_matched)),
@@ -206,6 +208,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--mono-lambda", type=float, default=None, help="单目深度（Depth Anything V2）patch Pearson 约束的起始权重（0 关闭）")
     ap.add_argument("--mono-lambda-end", type=float, default=None, help="单目深度约束的结束权重（线性衰减）")
     ap.add_argument("--mono-patch", type=int, default=None, help="单目深度约束的图块边长（像素）")
+    ap.add_argument("--mcmc-noise-lr", type=float, default=None, help="MCMC 位置噪声尺度（gsplat noise_lr，默认 5e5）")
+    ap.add_argument("--max-scale-m", type=float, default=None, help="裁掉最长轴超过此米数的高斯（0 关闭）")
     ap.add_argument("--strategy", default=None, choices=["default", "mcmc"], help="致密化策略（default 或 mcmc）")
     ap.add_argument("--dump-pruned", action="store_true", help="把贡献度剪枝和离群点滤波移除的高斯写入 pruned.ply（需 --train）")
     args = ap.parse_args(argv)
@@ -233,6 +237,8 @@ def main(argv: list[str] | None = None) -> int:
             ("mono_lambda", args.mono_lambda),
             ("mono_lambda_end", args.mono_lambda_end),
             ("mono_patch", args.mono_patch),
+            ("mcmc_noise_lr", args.mcmc_noise_lr),
+            ("max_scale_m", args.max_scale_m),
             ("strategy", args.strategy),
         )
         if v is not None
@@ -240,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
     if (overrides or args.dump_pruned) and not args.train:
         ap.error(
             "--pose-lr / --depth-lambda / --far-m / --bbox-margin-m / --support-far-m / --support-dist-m / --contrib-min-views / --contrib-min-px"
-            " / --contrib-view-px / --sor-sigma / --opacity-reg / --scale-reg / --appearance-lr / --appearance-reg / --mono-lambda / --mono-lambda-end / --mono-patch / --strategy / --dump-pruned 只能和 --train 一起用"
+            " / --contrib-view-px / --sor-sigma / --opacity-reg / --scale-reg / --appearance-lr / --appearance-reg / --mono-lambda / --mono-lambda-end / --mono-patch / --mcmc-noise-lr / --max-scale-m / --strategy / --dump-pruned 只能和 --train 一起用"
         )
     profile = dataclasses.replace(profile, **overrides)
 

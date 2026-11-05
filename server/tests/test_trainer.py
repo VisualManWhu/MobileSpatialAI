@@ -518,6 +518,25 @@ def test_profile_defaults_mcmc_without_pruning():
         assert p.support_far_m == 2.0 and p.support_dist_m == 0.3
         assert p.appearance_lr == 0.0 and p.appearance_reg == 1e-2
         assert p.mono_lambda == 0.1 and p.mono_lambda_end == 0.01 and p.mono_patch == 64
+        assert p.mcmc_noise_lr == 1e4 and p.max_scale_m == 0.0
+
+
+def test_cull_huge_removes_oversized_only():
+    from recon3d.recon.trainer import _cull_huge
+
+    n = 6
+    params = torch.nn.ParameterDict({
+        "means": torch.nn.Parameter(torch.zeros(n, 3)),
+        "scales": torch.nn.Parameter(torch.log(torch.tensor([[0.1, 0.1, 0.1]] * 5 + [[0.05, 1.5, 0.05]]))),
+        "quats": torch.nn.Parameter(torch.zeros(n, 4)),
+        "opacities": torch.nn.Parameter(torch.zeros(n)),
+        "sh0": torch.nn.Parameter(torch.zeros(n, 1, 3)),
+        "shN": torch.nn.Parameter(torch.zeros(n, 3, 3)),
+    })
+    opts = {k: torch.optim.Adam([v]) for k, v in params.items()}
+    assert _cull_huge(params, opts, {}, 0.0) == 0 and len(params["means"]) == n
+    assert _cull_huge(params, opts, {}, 1.0) == 1 and len(params["means"]) == n - 1
+    assert float(torch.exp(params["scales"]).max()) <= 1.0
 
 
 @pytest.mark.gpu
