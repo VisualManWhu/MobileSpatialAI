@@ -6,6 +6,7 @@ import dev.recon3d.net.ApiClient
 import dev.recon3d.net.ApiException
 import dev.recon3d.net.Health
 import dev.recon3d.net.JobStatus
+import dev.recon3d.net.UploadListener
 import dev.recon3d.rooms.RoomRepository
 import dev.recon3d.settings.ServerSettings
 import dev.recon3d.upload.UploadViewModel
@@ -45,7 +46,9 @@ private class SettingsBackedApi(private val settings: ServerSettings) : Api {
         ApiClient(settings.baseUrl.first() ?: throw ApiException(MSG_NO_SERVER))
 
     override suspend fun health(): Health = client().health()
-    override suspend fun upload(zip: File, onProgress: (Float) -> Unit): String = client().upload(zip, onProgress)
+    override suspend fun upload(zip: File, uploadId: String?, listener: UploadListener): String =
+        client().upload(zip, uploadId, listener)
     override suspend fun job(id: String): JobStatus = client().job(id)
-    override suspend fun downloadScene(id: String, dest: File) = client().downloadScene(id, dest)
+    override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) =
+        client().downloadScene(id, dest, onRetry)
 }

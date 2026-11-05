@@ -32,9 +32,24 @@ enum class JobState {
     @SerialName("failed") FAILED,
 }
 
-/** `POST /api/v1/jobs` 201 body. */
+/** `POST /api/v1/jobs` and `POST /api/v1/uploads/{id}/finish` 201 body. */
 @Serializable
 internal data class JobCreated(@SerialName("job_id") val jobId: String)
 
-/** Every client-visible failure, already phrased in Chinese for the UI. */
-class ApiException(val messageZh: String, cause: Throwable? = null) : Exception(messageZh, cause)
+/** `POST /api/v1/uploads` 201 body. */
+@Serializable
+internal data class UploadCreated(@SerialName("upload_id") val uploadId: String, val received: Long)
+
+/** `GET /api/v1/uploads/{id}` body. */
+@Serializable
+internal data class UploadInfo(@SerialName("upload_id") val uploadId: String, val size: Long, val received: Long)
+
+/** `PUT /api/v1/uploads/{id}` 200 body; also the extra key on its 409 bodies. */
+@Serializable
+internal data class Received(val received: Long)
+
+/**
+ * Every client-visible failure, already phrased in Chinese for the UI. [code] is the HTTP status for a
+ * server error response, null for transport failures (unreachable, dropped, timed out).
+ */
+class ApiException(val messageZh: String, cause: Throwable? = null, val code: Int? = null) : Exception(messageZh, cause)

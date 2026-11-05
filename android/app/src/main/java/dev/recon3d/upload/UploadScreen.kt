@@ -20,6 +20,7 @@ import dev.recon3d.net.Api
 import dev.recon3d.net.ApiClient
 import dev.recon3d.net.ApiException
 import dev.recon3d.net.JobState
+import dev.recon3d.net.UploadListener
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.RoomRepository
 import android.util.Log
@@ -140,20 +141,25 @@ class UploadViewModel(
         }
         // Persist only when the whole percent changes, whatever the client's callback rate.
         var lastPercent = 0
-        val jobId = api.upload(zip) { p ->
-            val percent = (p.coerceIn(0f, 1f) * 100).toInt()
-            if (percent != lastPercent) {
-                lastPercent = percent
-                // Runs on OkHttp's writer thread: a throw here would escape OkHttp, so only log.
-                try {
-                    repo.editCapture(roomId, captureId) {
-                        if (it.state == "uploading") it.copy(progress = percent / 100f) else it
+        // Temporary bridge until the view model persists the upload id (next task).
+        val jobId = api.upload(zip, null, object : UploadListener {
+            override fun onCreated(uploadId: String) {}
+            override fun onRetry(attempt: Int) {}
+            override fun onProgress(fraction: Float) {
+                val percent = (fraction.coerceIn(0f, 1f) * 100).toInt()
+                if (percent != lastPercent) {
+                    lastPercent = percent
+                    // Runs on a background thread: a throw here would escape the client, so only log.
+                    try {
+                        repo.editCapture(roomId, captureId) {
+                            if (it.state == "uploading") it.copy(progress = percent / 100f) else it
+                        }
+                    } catch (e: Exception) {
+                        log("could not record upload progress for $roomId/$captureId", e)
                     }
-                } catch (e: Exception) {
-                    log("could not record upload progress for $roomId/$captureId", e)
                 }
             }
-        }
+        })
         repo.editCapture(roomId, captureId) { it.copy(state = "queued", jobId = jobId, progress = 0f, message = null) }
         return jobId
     }

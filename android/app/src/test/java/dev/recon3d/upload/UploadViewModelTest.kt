@@ -6,6 +6,7 @@ import dev.recon3d.net.ApiException
 import dev.recon3d.net.Health
 import dev.recon3d.net.JobState
 import dev.recon3d.net.JobStatus
+import dev.recon3d.net.UploadListener
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.RoomRepository
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -52,11 +53,21 @@ private class FakeApi : Api {
 
     override suspend fun health() = Health("0.1.0", "gpu", "laptop")
 
-    override suspend fun upload(zip: File, onProgress: (Float) -> Unit): String {
+    /** The upload id the view model passed on the last call (null = new upload). */
+    var lastUploadId: String? = null
+    /** Retry attempts replayed through [UploadListener.onRetry] before progress. */
+    var retrySteps: List<Int> = emptyList()
+    /** Retry attempts replayed through downloadScene's onRetry. */
+    var downloadRetrySteps: List<Int> = emptyList()
+
+    override suspend fun upload(zip: File, uploadId: String?, listener: UploadListener): String {
         uploads++
+        lastUploadId = uploadId
+        if (uploadId == null) listener.onCreated("u1")
         uploadFailure?.let { uploadFailure = null; throw it }
         if (uploadDelayMs > 0) delay(uploadDelayMs)
-        progressSteps.forEach(onProgress)
+        retrySteps.forEach(listener::onRetry)
+        progressSteps.forEach(listener::onProgress)
         return "j"
     }
 
@@ -67,7 +78,8 @@ private class FakeApi : Api {
         return jobQueue.removeFirstOrNull() ?: jobResult
     }
 
-    override suspend fun downloadScene(id: String, dest: File) {
+    override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) {
+        downloadRetrySteps.forEach(onRetry)
         downloadFailure?.let { downloadFailure = null; throw it }
         dest.parentFile?.mkdirs()
         dest.writeBytes(sceneBytes)
