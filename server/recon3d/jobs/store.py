@@ -205,14 +205,18 @@ class JobStore:
         return info
 
     def resumable(self, upload_id: str) -> ResumableInfo | None:
-        """The upload's metadata, or None when unknown or already finished."""
+        """The upload's metadata, or None when unknown or already finished.
+
+        `received` is the part file's current size (the truth even while a PUT is streaming in);
+        upload.json's copy is only a record for the status of a crashed process.
+        """
         if not _JOB_ID.fullmatch(upload_id):
             return None
         try:
             raw = json.loads((self.job_dir(upload_id) / "upload.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
-        return ResumableInfo(upload_id=upload_id, **raw)
+        return ResumableInfo(upload_id=upload_id, **{**raw, "received": self._part_size(upload_id)})
 
     def append_resumable(self, upload_id: str, offset: int, chunks: Iterable[bytes]) -> int:
         """Write `chunks` at `offset` (which must equal the bytes already received); returns the new count.

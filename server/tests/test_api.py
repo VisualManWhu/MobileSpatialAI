@@ -200,3 +200,129 @@ def test_status_page_is_html(client):
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/html")
     assert "任务" in r.text and "/api/v1/jobs" in r.text
+
+
+# --- resumable uploads (docs/superpowers/specs/2026-11-05-recon3d-resumable-transfer-design.md) ---
+
+import hashlib
+
+
+def _begin(c, data):
+    r = c.post("/api/v1/uploads", json={"size": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+    assert r.status_code == 201 and r.json()["received"] == 0
+    return r.json()["upload_id"]
+
+
+def _put(c, uid, offset, body):
+    return c.put(
+        f"/api/v1/uploads/{uid}",
+        content=body,
+        headers={"Upload-Offset": str(offset), "Content-Type": "application/octet-stream"},
+    )
+
+
+def test_resumable_upload_flow(client):
+    data = b"z" * 5000
+    uid = _begin(client, data)
+    assert _put(client, uid, 0, data[:2000]).json() == {"received": 2000}
+    assert client.get(f"/api/v1/uploads/{uid}").json() == {"upload_id": uid, "size": 5000, "received": 2000}
+    r = _put(client, uid, 1000, b"x")
+    assert r.status_code == 409 and r.json() == {"detail": "偏移不匹配", "received": 2000}
+    r = client.post(f"/api/v1/uploads/{uid}/finish")
+    assert r.status_code == 409 and r.json() == {"detail": "上传未完成", "received": 2000}
+    assert _put(client, uid, 2000, data[2000:]).json() == {"received": 5000}
+    r = client.post(f"/api/v1/uploads/{uid}/finish")
+    assert r.status_code == 201 and r.json() == {"job_id": uid}
+    assert client.post(f"/api/v1/uploads/{uid}/finish").json() == {"job_id": uid}  # idempotent
+    r = _put(client, uid, 5000, b"q")
+    assert r.status_code == 409 and r.json()["detail"] == "上传已完成"
+    assert client.get(f"/api/v1/uploads/{uid}").status_code == 404
+    wait_until(lambda: client.get(f"/api/v1/jobs/{uid}").json()["state"] == "done")
+
+
+def test_resumable_checksum_mismatch_is_422_and_gone(client):
+    r = client.post("/api/v1/uploads", json={"size": 3, "sha256": "0" * 64})
+    uid = r.json()["upload_id"]
+    _put(client, uid, 0, b"abc")
+    r = client.post(f"/api/v1/uploads/{uid}/finish")
+    assert r.status_code == 422 and r.json()["detail"] == "文件校验失败，请重新上传"
+    assert client.get(f"/api/v1/uploads/{uid}").status_code == 404
+
+
+def test_resumable_bad_requests(tmp_path):
+    with _client(tmp_path, _fast, max_upload_bytes=10) as c:
+        assert c.post("/api/v1/uploads", json={"size": 11, "sha256": "0" * 64}).status_code == 413
+        assert c.post("/api/v1/uploads", json={"size": 0, "sha256": "0" * 64}).status_code == 422
+        assert c.post("/api/v1/uploads", json={"size": 5, "sha256": "nope"}).status_code == 422
+        assert c.get("/api/v1/uploads/000000000000").status_code == 404
+        assert c.get("/api/v1/uploads/000000000000").json() == {"detail": "上传不存在"}
+        assert _put(c, "000000000000", 0, b"x").status_code == 404
+        assert c.post("/api/v1/uploads/000000000000/finish").status_code == 404
+        uid = c.post("/api/v1/uploads", json={"size": 4, "sha256": "0" * 64}).json()["upload_id"]
+        assert _put(c, uid, 0, b"12345").status_code == 413
+        assert c.get(f"/api/v1/uploads/{uid}").status_code == 404  # deleted with the 413
+        uid = c.post("/api/v1/uploads", json={"size": 4, "sha256": "0" * 64}).json()["upload_id"]
+        r = c.put(f"/api/v1/uploads/{uid}", content=b"1")
+        assert r.status_code == 422 and r.json()["detail"] == "缺少 Upload-Offset"
+
+
+def test_post_uploads_sweeps_expired(tmp_path):
+    import json
+
+    with _client(tmp_path, _fast) as c:
+        old = c.post("/api/v1/uploads", json={"size": 4, "sha256": "0" * 64}).json()["upload_id"]
+        meta = tmp_path / "data" / "jobs" / old / "upload.json"
+        j = json.loads(meta.read_text(encoding="utf-8"))
+        j["updated_at"] -= 90000
+        meta.write_text(json.dumps(j), encoding="utf-8")
+        c.post("/api/v1/uploads", json={"size": 4, "sha256": "0" * 64})
+        assert c.get(f"/api/v1/uploads/{old}").status_code == 404
+
+
+def test_put_disconnect_keeps_bytes(tmp_path):
+    """Raw ASGI: the client vanishes after 3 of 6 body bytes; the 3 must be on disk and reported."""
+    import anyio
+
+    store = JobStore(tmp_path / "data")
+    app = create_app(store, Worker(store, _fast), PROFILES["laptop"])
+    info = store.begin_resumable(6, "0" * 64)
+    sent = []
+
+    async def run():
+        pulled = 0
+
+        async def receive():
+            nonlocal pulled
+            pulled += 1
+            if pulled == 1:
+                return {"type": "http.request", "body": b"123", "more_body": True}
+            return {"type": "http.disconnect"}
+
+        async def send(msg):
+            sent.append(msg)
+
+        scope = {
+            "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1", "method": "PUT",
+            "scheme": "http", "path": f"/api/v1/uploads/{info.upload_id}",
+            "raw_path": f"/api/v1/uploads/{info.upload_id}".encode(), "query_string": b"",
+            "root_path": "", "headers": [(b"upload-offset", b"0"), (b"content-type", b"application/octet-stream")],
+            "client": ("test", 1), "server": ("test", 80),
+        }
+        await app(scope, receive, send)
+
+    anyio.run(run)
+    assert store.resumable(info.upload_id).received == 3
+
+
+def test_concurrent_put_is_409(tmp_path):
+    """A PUT while another is streaming in: 409 busy with the bytes on disk so far. The in-flight PUT
+    is simulated by holding the store's per-upload lock (TestClient serialises request bodies, so a
+    real overlapping request cannot be made through it); the lock itself is covered in test_jobs."""
+    store = JobStore(tmp_path / "data")
+    with TestClient(create_app(store, Worker(store, _fast), PROFILES["laptop"])) as c:
+        uid = c.post("/api/v1/uploads", json={"size": 2, "sha256": "0" * 64}).json()["upload_id"]
+        assert _put(c, uid, 0, b"1").json() == {"received": 1}
+        with store._upload_lock(uid):
+            r = _put(c, uid, 1, b"2")
+            assert r.status_code == 409 and r.json() == {"detail": "该上传正在接收中", "received": 1}
+        assert _put(c, uid, 1, b"2").json() == {"received": 2}

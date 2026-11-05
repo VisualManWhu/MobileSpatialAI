@@ -8,6 +8,7 @@ from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse
 
 from recon3d import __version__
+from recon3d.api.resumable import router as resumable_router
 from recon3d.api.status_page import HTML as STATUS_PAGE
 from recon3d.api.upload import FORM_OVERHEAD, receive_capture
 from recon3d.api.upload import too_large as _too_large
@@ -104,5 +105,6 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
     def status_page():
         return STATUS_PAGE
 
+    api.include_router(resumable_router(store))
     app.include_router(api)
     return app
