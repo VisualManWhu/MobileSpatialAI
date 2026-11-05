@@ -30,6 +30,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancelAndJoin
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.io.File
@@ -53,6 +54,9 @@ internal fun reconnectingMessage(n: Int) = "$MSG_RECONNECTING_PREFIX ($n)"
 
 /** Server 404 detail for an unknown job (docs/api.md): the job is gone, so retry must re-upload. */
 private const val MSG_JOB_GONE = "任务不存在"
+
+/** Record state after "仅删手机文件": files gone, the server still has the model (see DeleteViewModel). */
+const val STATE_REMOTE = "remote"
 
 /**
  * Drives one capture through upload → poll every [poll] → download `scene.splat` to
@@ -95,6 +99,25 @@ class UploadViewModel(
         } else {
             launchOnce(roomId, captureId) { track(roomId, captureId, jobId) }
         }
+    }
+
+    /**
+     * Cancels the upload / poll / download coroutine for this capture and waits for it to end. The
+     * record is left as it is: the caller (DeleteViewModel) removes it next. No-op when none runs.
+     */
+    suspend fun cancel(roomId: String, captureId: String) {
+        val job = synchronized(running) { running["$roomId/$captureId"] } ?: return
+        job.cancelAndJoin()
+    }
+
+    /** For a `remote` record: polls the known job again and downloads `scene.splat` back. */
+    fun redownload(roomId: String, captureId: String) {
+        val jobId = repo.capture(roomId, captureId).jobId
+        if (jobId == null) {
+            fail(roomId, captureId, MSG_JOB_GONE, jobGone = true)
+            return
+        }
+        launchOnce(roomId, captureId) { track(roomId, captureId, jobId) }
     }
 
     /**
@@ -288,6 +311,7 @@ fun captureStatusText(record: CaptureRecord): String {
         // While downloading the message is "正在下载模型…", possibly with a reconnect suffix.
         "exporting" -> record.message?.takeIf { it.startsWith(MSG_DOWNLOADING) } ?: "导出中"
         "done" -> "完成"
+        STATE_REMOTE -> "仅云端"
         "failed" -> "失败：${record.message ?: "未知原因"}"
         else -> record.state
     }

@@ -469,4 +469,52 @@ class UploadViewModelTest {
         assertFalse(showsPointsButton(r.copy(state = "done")))
         assertFalse(showsPointsButton(r.copy(pointsPath = null, state = "training")))
     }
+
+    // --- cancel / redownload / remote (docs/superpowers/specs/2026-11-05-recon3d-delete-design.md) ---
+
+    @Test fun cancelStopsUploadAndJoins() = runTest {
+        val vm = vm()
+        api.uploadDelayMs = 10_000
+        vm.start(room, cap)
+        advanceTimeBy(1_000)
+        assertTrue(vm.isRunning(room, cap))
+        vm.cancel(room, cap)
+        assertFalse(vm.isRunning(room, cap))
+        assertEquals("uploading", repo.capture(room, cap).state) // caller deletes next; cancel leaves it
+        advanceUntilIdle()
+        assertEquals(0, api.polls)
+    }
+
+    @Test fun cancelWithoutRunningCoroutineIsNoop() = runTest {
+        vm().cancel(room, cap)
+    }
+
+    @Test fun redownloadRestoresDoneFromRemote() = runTest {
+        repo.editCapture(room, cap) { it.copy(state = "remote", jobId = "j", zipPath = "", scenePath = null) }
+        val vm = vm()
+        vm.redownload(room, cap); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("done", rec.state)
+        assertArrayEquals(api.sceneBytes, File(rec.scenePath!!).readBytes())
+        assertEquals(0, api.uploads)
+    }
+
+    @Test fun redownloadOfDeletedJobFailsWithJobGone() = runTest {
+        repo.editCapture(room, cap) { it.copy(state = "remote", jobId = "j", zipPath = "", scenePath = null) }
+        api.failJobOnce(ApiException("任务不存在", code = 404))
+        val vm = vm()
+        vm.redownload(room, cap); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state)
+        assertEquals("任务不存在", rec.message)
+        assertNull(rec.jobId)
+    }
+
+    @Test fun remoteStatusTextAndResumeIgnoresIt() = runTest {
+        assertEquals("仅云端", captureStatusText(CaptureRecord(id = cap, zipPath = "", state = "remote", jobId = "j")))
+        repo.editCapture(room, cap) { it.copy(state = "remote", jobId = "j") }
+        vm().resumeInterrupted(); advanceUntilIdle()
+        assertEquals(0, api.polls)
+        assertEquals("remote", repo.capture(room, cap).state)
+    }
 }
