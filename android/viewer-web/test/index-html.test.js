@@ -47,3 +47,8 @@ test("index.html carries the roam toggle and both joystick rings (hidden until r
   assert.match(html, /body:not\(\.roam\) \.stick \{ display: none; \}/);
   assert.match(html, />漫游</); // default label: orbit mode is active
 });
+
+test("index.html has the height rail beside the move stick", () => {
+  const html = readFileSync(new URL("../src/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="stick-climb" class="stick"/);
+});

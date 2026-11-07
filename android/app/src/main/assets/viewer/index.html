@@ -23,6 +23,9 @@
     }
     #stick-move { left: 28px; }
     #stick-look { right: 28px; }
+    /* Height rail: one-axis stick beside the move stick (left thumb reaches both). */
+    #stick-climb { left: 188px; width: 56px; height: 140px; border-radius: 28px; }
+    #stick-climb .knob { width: 44px; height: 44px; margin: -22px 0 0 -22px; }
     .knob {
       position: absolute; left: 50%; top: 50%; width: 56px; height: 56px; margin: -28px 0 0 -28px;
       border-radius: 50%; background: rgba(255, 255, 255, 0.75); pointer-events: none;
@@ -33,6 +36,7 @@
 <body>
   <button id="roam-toggle" type="button" hidden>漫游</button>
   <div id="stick-move" class="stick"><div class="knob"></div></div>
+  <div id="stick-climb" class="stick"><div class="knob"></div></div>
   <div id="stick-look" class="stick"><div class="knob"></div></div>
   <!-- Runs before the bundle: if viewer.js fails to load/parse or anything throws outside
        boot()'s try, the app still gets exactly one onError instead of spinning forever. -->

@@ -17,11 +17,11 @@ function fakeElement(rect) {
   };
 }
 
-function setup() {
+function setup(opts) {
   const ring = fakeElement({ left: 100, top: 300, width: 140, height: 140 });
   const knob = fakeElement({});
   const changes = [];
-  attachJoystick(ring, knob, (v) => changes.push(v));
+  attachJoystick(ring, knob, (v) => changes.push(v), opts);
   return { ring, knob, changes };
 }
 
@@ -57,4 +57,20 @@ test("the knob is clamped to the ring and the finger offset is measured from the
   ring.fire("pointerdown", { pointerId: 3, clientX: 170, clientY: 370 });
   ring.fire("pointermove", { pointerId: 3, clientX: 1000, clientY: 370 });
   assert.equal(knob.style.transform, "translate(70px, 0px)");
+});
+
+test("a vertical-only control (the height rail) ignores sideways finger motion", () => {
+  const rail = fakeElement({ left: 200, top: 300, width: 56, height: 140 });
+  const knob = fakeElement({});
+  const changes = [];
+  attachJoystick(rail, knob, (v) => changes.push(v), { vertical: true });
+  rail.fire("pointerdown", { pointerId: 4, clientX: 228, clientY: 370 }); // centre
+  rail.fire("pointermove", { pointerId: 4, clientX: 400, clientY: 335 }); // far right, half up
+  const last = changes[changes.length - 1];
+  assert.equal(last.x, 0);
+  assert.ok(last.y > 0.4 && last.y < 0.5, `y ${last.y}`); // 35/70 = 0.5 minus deadzone rescale
+  assert.equal(knob.style.transform, "translate(0px, -35px)");
+  rail.fire("pointermove", { pointerId: 4, clientX: 228, clientY: 1000 }); // way below: clamp to rail end
+  assert.equal(knob.style.transform, "translate(0px, 70px)");
+  assert.equal(changes[changes.length - 1].y, -1);
 });

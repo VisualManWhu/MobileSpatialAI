@@ -3,6 +3,7 @@
 
 export const STICK_DEADZONE = 0.1; // fraction of the ring radius with no effect
 export const MAX_SPEED_MPS = 1.5; // full left-stick deflection, metres per second (scenes are metric)
+export const MAX_CLIMB_MPS = 1.0; // full height-rail deflection
 export const MAX_TURN_RAD_PER_S = (120 * Math.PI) / 180; // full right-stick deflection
 export const PITCH_LIMIT_RAD = (89 * Math.PI) / 180; // never flip over the pole
 
@@ -53,22 +54,23 @@ function wrapPi(a) {
 }
 
 /**
- * One integration step. `move` is the left stick (x strafe right, y forward along the line of
- * sight), `look` the right stick (x turn right, y pitch up), both from stickVector; dt in seconds.
- * Returns a new { position, yaw, pitch }; the input is not mutated.
+ * One integration step. `move` is the left stick (x strafe right, y walk forward along the LEVEL
+ * heading: the pitch never changes the height, like walking), `look` the right stick (x turn
+ * right, y pitch up), both from stickVector; `climb` in [-1, 1] moves straight up/down; dt in
+ * seconds. Returns a new { position, yaw, pitch }; the input is not mutated.
  */
-export function roamStep(state, move, look, dtSec) {
+export function roamStep(state, move, look, climb, dtSec) {
   const dt = Math.max(0, dtSec || 0);
   const yaw = wrapPi(state.yaw - look.x * MAX_TURN_RAD_PER_S * dt);
   const pitch = Math.max(-PITCH_LIMIT_RAD, Math.min(PITCH_LIMIT_RAD, state.pitch + look.y * MAX_TURN_RAD_PER_S * dt));
-  const f = forwardOf(yaw, pitch);
+  const f = forwardOf(yaw, 0); // level heading
   const r = rightOf(yaw);
   const d = MAX_SPEED_MPS * dt;
   const p = state.position;
   return {
     position: {
       x: p.x + (f.x * move.y + r.x * move.x) * d,
-      y: p.y + (f.y * move.y + r.y * move.x) * d,
+      y: p.y + (climb || 0) * MAX_CLIMB_MPS * dt,
       z: p.z + (f.z * move.y + r.z * move.x) * d,
     },
     yaw,

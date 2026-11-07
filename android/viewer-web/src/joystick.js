@@ -6,20 +6,22 @@ import { stickVector } from "./roam-math.js";
  * Wires `ring` (position: fixed circle) and `knob` (its centred child, moved via transform).
  * onChange({ x, y }) fires on every move and with { x: 0, y: 0 } on release; the finger offset is
  * measured from the ring's centre, so the first touch anywhere in the ring already deflects.
+ * { vertical: true } makes a one-axis rail: sideways motion is ignored and the travel is half the
+ * element's HEIGHT (the height rail is a tall pill, not a circle).
  */
-export function attachJoystick(ring, knob, onChange) {
+export function attachJoystick(ring, knob, onChange, { vertical = false } = {}) {
   let active = null; // pointerId holding the stick
 
   const centre = () => {
     const r = ring.getBoundingClientRect();
-    return { x: r.left + r.width / 2, y: r.top + r.height / 2, radius: r.width / 2 };
+    return { x: r.left + r.width / 2, y: r.top + r.height / 2, radius: (vertical ? r.height : r.width) / 2 };
   };
   const place = (x, y) => {
     knob.style.transform = `translate(${x}px, ${y}px)`;
   };
   const update = (ev) => {
     const c = centre();
-    const s = stickVector(ev.clientX - c.x, ev.clientY - c.y, c.radius);
+    const s = stickVector(vertical ? 0 : ev.clientX - c.x, ev.clientY - c.y, c.radius);
     place(s.knob.x, s.knob.y);
     onChange({ x: s.x, y: s.y });
   };

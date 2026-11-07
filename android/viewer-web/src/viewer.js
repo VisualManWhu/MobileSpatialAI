@@ -78,19 +78,25 @@ function init() {
   initRoamUi();
 }
 
-/** 漫游 overlay (index.html): toggle button + two joysticks. Left = move, right = look. */
+/** 漫游 overlay (index.html): toggle + sticks. Left = walk, rail = height, right = look. */
 function initRoamUi() {
   const toggle = document.getElementById("roam-toggle");
-  const stick = (id, apply) => {
+  const stick = (id, apply, opts) => {
     const ring = document.getElementById(id);
     if (!ring) return;
-    attachJoystick(ring, ring.querySelector(".knob"), (v) => {
-      if (!roam) return;
-      apply(v);
-      requestRender();
-    });
+    attachJoystick(
+      ring,
+      ring.querySelector(".knob"),
+      (v) => {
+        if (!roam) return;
+        apply(v);
+        requestRender();
+      },
+      opts,
+    );
   };
   stick("stick-move", (v) => (roam.move = v));
+  stick("stick-climb", (v) => (roam.climb = v.y), { vertical: true });
   stick("stick-look", (v) => (roam.look = v));
   if (toggle) toggle.addEventListener("click", () => setRoam(!roam));
 }
@@ -101,7 +107,7 @@ function setRoam(on) {
   cancelFlight();
   const toggle = document.getElementById("roam-toggle");
   if (on) {
-    roam = { yaw: 0, pitch: 0, move: { x: 0, y: 0 }, look: { x: 0, y: 0 }, lastT: 0 };
+    roam = { yaw: 0, pitch: 0, move: { x: 0, y: 0 }, look: { x: 0, y: 0 }, climb: 0, lastT: 0 };
     syncRoamFromCamera();
     controls.enabled = false;
     document.body.classList.add("roam");
@@ -147,12 +153,18 @@ function syncRoamFromCamera() {
 function roamFrame(now) {
   const dt = roam.lastT ? Math.min(MAX_STEP_S, (now - roam.lastT) / 1000) : 0;
   roam.lastT = now;
-  const pushing = roam.move.x || roam.move.y || roam.look.x || roam.look.y;
+  const pushing = roam.move.x || roam.move.y || roam.look.x || roam.look.y || roam.climb;
   if (!pushing) {
     roam.lastT = 0; // next push starts a fresh clock, not one from seconds ago
     return false;
   }
-  const next = roamStep({ position: camera.position, yaw: roam.yaw, pitch: roam.pitch }, roam.move, roam.look, dt);
+  const next = roamStep(
+    { position: camera.position, yaw: roam.yaw, pitch: roam.pitch },
+    roam.move,
+    roam.look,
+    roam.climb,
+    dt,
+  );
   roam.yaw = next.yaw;
   roam.pitch = next.pitch;
   const f = forwardOf(next.yaw, next.pitch);
