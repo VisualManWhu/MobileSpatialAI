@@ -222,3 +222,43 @@ train: on_progress(POSE_SHARE + (TRAIN_SHARE - POSE_SHARE) * p)   # 0.3 → 0.9
 - mapper 以"没有点的初始重建"作 input 时什么都不做（0.1 s、0 点）：必须先 `triangulate_points` 再喂 mapper。
   pycolmap 还提示 `No pose priors with valid covariance found`（终局对齐被跳过）：写先验时带
   `position_covariance = diag(0.3²)`。
+
+## 9. 1123 帧多房间包实测（spike，2026-11-07，任务 40a80bd6c17f，两房间 + 20 m 走廊，轨迹 127 m）
+
+同一拍摄、同一训练预算（laptop profile，15000 步），只换位姿：
+
+| | 快速（ARCore 位姿） | 高精（COLMAP BA 位姿） |
+|---|---|---|
+| PSNR 中位数 | 16.13 dB | **22.66 dB** |
+| PSNR 最小 | 8.17 dB | 9.82 dB |
+| 训练后高斯数 | 10.3 万（裁掉 253 万） | **143 万** |
+| 不透明高斯 | 2 471 | 43 307 |
+| floater 分数 | 0.70 | **0.22** |
+| 训练用时 | 13.3 min | 23.5 min（和 COLMAP 匹配抢 CPU） |
+
+快速模式在这个场景**整体坍塌**：位姿漂移让深度点云和图像互相矛盾，支持裁剪几乎把所有高斯都当成飘点删掉，
+偏轨渲染全是色块。高精位姿下同一流程出了能看的房间、走廊、家具（`data/ab/precise/40a80bd6c17f/compare_offtrack.jpg`）。
+
+COLMAP 阶段耗时（CPU，与 GPU 训练并行、机器中途休眠，数字偏大）：
+
+| 阶段 | 耗时 | 备注 |
+|---|---|---|
+| 特征提取 | 453 s | 每帧 0.4 s |
+| 顺序匹配（overlap 10） | 546 s | |
+| 空间匹配（30 邻居，3 m） | 实测无效（机器休眠） | 恢复后约 0.7 s/帧 → 估 13 min |
+| 已知位姿三角化 | 101 s | 27.7 万点，重投影 1.30 px |
+| mapper 迭代 BA（位置先验） | 881 s | 26.2 万点，1123/1123 注册，重投影 0.68 px |
+| **合计（估）** | **约 45 min** | 超出 §1 的 15–30 min 预算，见下 |
+
+位姿修正量（相对 ARCore）：均值 8.9 cm，中位 6.8 cm，最大 50 cm（第 682 帧，走廊尽头房间）；
+尺度 1.0000，旋转 0.00°（先验钉住坐标系）。高度漂移范围 0.60 m → 0.43 m。
+走廊去/回两段的最近距离中位数 0.28 m → 0.23 m：ARCore 的回环误差在这个包里不算大，
+主要收益来自**局部**几厘米到几十厘米的位姿修正——对 3DGS 来说这就是坍塌与否的差别。
+
+由此调整的决定：
+- 1123 帧 45 min 超预算。正式实现里：空间匹配 `max_num_neighbors` 降到 20；mapper
+  `ba_global_max_refinements` 3 次足够（本次 0.68 px 已收敛）；顺序匹配 overlap 保持 10。
+  预计 25–30 min。若仍超，下一步是在高精模式里按 ≥ 0.15 m / 10° 抽稀再做 COLMAP（未注册帧套邻帧修正量）。
+- 匹配/BA 运行时 GPU 空闲：worker 可以在 COLMAP 阶段先跑单目深度推理（52 s），省不了多少，不做。
+- pycolmap 4.2.1 API 注意：`Image.cam_from_world` 是**方法**（`cam_from_world()` 返回 `Rigid3d`，再 `.matrix()` 取 3×4）；
+  `Reconstruction.add_camera` 必须在 `add_rig` 之前；`FeatureExtractionOptions.max_image_size`（不在 `sift` 下）。
