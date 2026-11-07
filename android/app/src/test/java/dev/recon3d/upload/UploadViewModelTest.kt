@@ -517,4 +517,30 @@ class UploadViewModelTest {
         assertEquals("训练中 30% · 高精 · 网络暂时不可用，正在重试 (1/10)",
             captureStatusText(r.copy(state = "training", progress = 0.3f, message = retryingMessage(1))))
     }
+
+    // --- row actions / rerun menu (pure UI helpers) ---
+
+    @Test fun rowActionsPerState() {
+        val r = CaptureRecord(id = "c", zipPath = "z")
+        assertEquals(listOf("快速上传", "高精上传"), rowActions(r).map { it.first })
+        assertEquals(RowAction.Upload("precise"), rowActions(r).last().second)
+        assertEquals(RowAction.Upload("fast"), rowActions(r).first().second)
+        assertEquals(listOf("重试"), rowActions(r.copy(state = "failed", jobId = "j")).map { it.first })
+        assertEquals(RowAction.Retry, rowActions(r.copy(state = "failed", jobId = "j")).single().second)
+        assertEquals(listOf("继续上传"), rowActions(r.copy(state = "failed", uploadId = "u")).map { it.first })
+        assertEquals(listOf("快速重传", "高精重传"), rowActions(r.copy(state = "failed")).map { it.first })
+        assertEquals(listOf("查看 3D" to RowAction.View), rowActions(r.copy(state = "done")))
+        assertEquals(listOf("重新下载" to RowAction.Redownload), rowActions(r.copy(state = "remote")))
+        assertTrue(rowActions(r.copy(state = "training")).isEmpty())
+        assertTrue(rowActions(r.copy(state = "uploading")).isEmpty())
+    }
+
+    @Test fun rerunMenuOnlyWhenDone() {
+        val r = CaptureRecord(id = "c", zipPath = "z", state = "done")
+        assertEquals("改用高精重算", rerunMenuLabel(r)); assertEquals("precise", rerunMenuMode(r))
+        assertEquals("改用快速重算", rerunMenuLabel(r.copy(mode = "precise"))); assertEquals("fast", rerunMenuMode(r.copy(mode = "precise")))
+        assertNull(rerunMenuLabel(r.copy(state = "training")))
+        assertNull(rerunMenuLabel(r.copy(state = "remote")))
+        assertNull(rerunMenuLabel(r.copy(state = "failed")))
+    }
 }

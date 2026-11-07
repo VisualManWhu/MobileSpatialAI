@@ -22,7 +22,6 @@ import dev.recon3d.net.ApiException
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.DeleteDialog
 import dev.recon3d.rooms.DeleteMode
-import dev.recon3d.rooms.MODE_FAST
 import dev.recon3d.rooms.RoomListScreen
 import dev.recon3d.rooms.RoomScreen
 import dev.recon3d.rooms.captureDeleteBody
@@ -112,12 +111,13 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
                 repo = graph.rooms,
                 roomId = roomId,
                 onCapture = { nav.navigate(Routes.capture(roomId)) },
-                onUpload = { id -> withServer { graph.uploader.start(roomId, id, MODE_FAST) } },
+                onUpload = { id, mode -> withServer { graph.uploader.start(roomId, id, mode) } },
                 onRetry = { id -> withServer { graph.uploader.retry(roomId, id) } },
                 onView = { id -> nav.navigate(Routes.viewer(roomId, id)) },
                 onViewPoints = { id -> nav.navigate(Routes.points(roomId, id)) },
                 onDeleteCapture = { id -> pendingDelete = DeleteTarget.Capture(id) },
                 onRedownload = { id -> withServer { graph.uploader.redownload(roomId, id) } },
+                onRerun = { id, mode -> withServer { graph.uploader.rerun(roomId, id, mode) } },
                 onDeleteRoom = { pendingDelete = DeleteTarget.Room },
                 onBack = { nav.popBackStack() },
             )
@@ -191,9 +191,9 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
             fun resumed() = entry.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
             PreviewScreen(
                 record = record,
-                onUpload = {
+                onUpload = { mode ->
                     if (!resumed()) return@PreviewScreen
-                    withServer { graph.uploader.start(roomId, captureId, MODE_FAST) }
+                    withServer { graph.uploader.start(roomId, captureId, mode) }
                     nav.popBackStack() // room shows the upload progress
                 },
                 onRetake = {

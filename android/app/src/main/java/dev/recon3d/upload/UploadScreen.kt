@@ -402,16 +402,54 @@ fun retryButtonLabel(record: CaptureRecord): String = when {
  */
 fun showsPointsButton(record: CaptureRecord): Boolean = record.pointsPath != null && record.state != "done"
 
-/** One capture: id, Chinese status, progress bar while uploading/training, its action button and a ⋮ menu (删除). */
+/** What a row's action button does. */
+sealed interface RowAction {
+    /** Upload (or re-upload) the kept zip in [mode]. */
+    data class Upload(val mode: String) : RowAction
+    /** Resume the known job / upload ([retryButtonLabel]). */
+    object Retry : RowAction
+    object View : RowAction
+    object Redownload : RowAction
+}
+
+/**
+ * Buttons for a row's right side, left to right, as (label, action); the last one is the primary.
+ * `local` offers both modes; `failed` resumes when a server id is known, else offers both modes again.
+ */
+fun rowActions(record: CaptureRecord): List<Pair<String, RowAction>> = when (record.state) {
+    "local" -> listOf("快速上传" to RowAction.Upload(MODE_FAST), "高精上传" to RowAction.Upload(MODE_PRECISE))
+    "failed" ->
+        if (record.jobId != null || record.uploadId != null) listOf(retryButtonLabel(record) to RowAction.Retry)
+        else listOf("快速重传" to RowAction.Upload(MODE_FAST), "高精重传" to RowAction.Upload(MODE_PRECISE))
+    "done" -> listOf("查看 3D" to RowAction.View)
+    STATE_REMOTE -> listOf("重新下载" to RowAction.Redownload)
+    else -> emptyList()
+}
+
+/** ⋮ menu entry that re-reconstructs a finished capture in the other mode; null when not offered. */
+fun rerunMenuLabel(record: CaptureRecord): String? = when {
+    record.state != "done" -> null
+    record.mode == MODE_PRECISE -> "改用快速重算"
+    else -> "改用高精重算"
+}
+
+/** The mode [rerunMenuLabel] switches to: the opposite of the record's. */
+fun rerunMenuMode(record: CaptureRecord): String = if (record.mode == MODE_PRECISE) MODE_FAST else MODE_PRECISE
+
+/**
+ * One capture: id, Chinese status, progress bar while uploading/training, its action button(s) and a ⋮ menu
+ * (改用高精重算 / 改用快速重算 when done, 删除).
+ */
 @Composable
 fun CaptureRow(
     record: CaptureRecord,
-    onUpload: () -> Unit,
+    onUpload: (mode: String) -> Unit,
     onRetry: () -> Unit,
     onView: () -> Unit,
     onViewPoints: () -> Unit,
     onDelete: () -> Unit,
     onRedownload: () -> Unit,
+    onRerun: (mode: String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     var menuOpen by remember { mutableStateOf(false) }
@@ -425,19 +463,27 @@ fun CaptureRow(
                 if (showsPointsButton(record)) {
                     TextButton(onClick = onViewPoints) { Text("看点云") }
                 }
-                when (record.state) {
-                    "local" -> Button(onClick = onUpload) { Text("上传") }
-                    "failed" -> OutlinedButton(onClick = onRetry) {
-                        Text(retryButtonLabel(record))
+                val actions = rowActions(record)
+                actions.forEachIndexed { i, (label, action) ->
+                    val onClick: () -> Unit = {
+                        when (action) {
+                            is RowAction.Upload -> onUpload(action.mode)
+                            RowAction.Retry -> onRetry()
+                            RowAction.View -> onView()
+                            RowAction.Redownload -> onRedownload()
+                        }
                     }
-                    "done" -> Button(onClick = onView) { Text("查看 3D") }
-                    STATE_REMOTE -> OutlinedButton(onClick = onRedownload) { Text("重新下载") }
+                    if (i == actions.lastIndex) Button(onClick = onClick) { Text(label) }
+                    else OutlinedButton(onClick = onClick) { Text(label) }
                 }
                 Box {
                     IconButton(onClick = { menuOpen = true }, modifier = Modifier.semantics { contentDescription = "更多" }) {
                         Text("⋮", fontSize = 22.sp)
                     }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        rerunMenuLabel(record)?.let { label ->
+                            DropdownMenuItem(text = { Text(label) }, onClick = { menuOpen = false; onRerun(rerunMenuMode(record)) })
+                        }
                         DropdownMenuItem(text = { Text("删除") }, onClick = { menuOpen = false; onDelete() })
                     }
                 }

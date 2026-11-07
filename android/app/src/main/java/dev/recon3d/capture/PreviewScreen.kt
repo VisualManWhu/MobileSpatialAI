@@ -19,20 +19,22 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import dev.recon3d.rooms.CaptureRecord
+import dev.recon3d.rooms.MODE_FAST
+import dev.recon3d.rooms.MODE_PRECISE
 import dev.recon3d.upload.captureStatusText
 import dev.recon3d.viewer.SceneViewer
 
 /**
  * The capture-time point cloud (keyframe depth back-projected while recording) as a turnable cloud.
  *
- * Right after recording ([onUpload] and [onRetake] given) it is the check before spending minutes on an upload.
- * Opened from the room while the capture uploads or trains (both null) it is read-only: the bottom shows the
- * live status line instead of the buttons.
+ * Right after recording ([onUpload] and [onRetake] given) it is the check before spending minutes on an upload;
+ * [onUpload] gets the chosen reconstruction mode ([MODE_FAST] | [MODE_PRECISE]). Opened from the room while the
+ * capture uploads or trains (both null) it is read-only: the bottom shows the live status line instead of the buttons.
  */
 @Composable
 fun PreviewScreen(
     record: CaptureRecord,
-    onUpload: (() -> Unit)?,
+    onUpload: ((mode: String) -> Unit)?,
     onRetake: (() -> Unit)?,
     modifier: Modifier = Modifier,
 ) {
@@ -68,7 +70,11 @@ fun PreviewScreen(
                 OutlinedButton(onClick = onRetake, colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)) {
                     Text("重拍")
                 }
-                Button(onClick = onUpload) { Text("上传") }
+                OutlinedButton(
+                    onClick = { onUpload(MODE_FAST) },
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                ) { Text("快速上传") }
+                Button(onClick = { onUpload(MODE_PRECISE) }) { Text("高精上传") }
             }
         } else {
             Text(

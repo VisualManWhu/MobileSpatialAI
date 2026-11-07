@@ -142,12 +142,13 @@ fun RoomScreen(
     repo: RoomRepository,
     roomId: String,
     onCapture: () -> Unit,
-    onUpload: (captureId: String) -> Unit,
+    onUpload: (captureId: String, mode: String) -> Unit,
     onRetry: (captureId: String) -> Unit,
     onView: (captureId: String) -> Unit,
     onViewPoints: (captureId: String) -> Unit,
     onDeleteCapture: (captureId: String) -> Unit,
     onRedownload: (captureId: String) -> Unit,
+    onRerun: (captureId: String, mode: String) -> Unit,
     onDeleteRoom: () -> Unit,
     onBack: () -> Unit,
     modifier: Modifier = Modifier,
@@ -197,12 +198,13 @@ fun RoomScreen(
                 items(room.captures.asReversed(), key = { it.id }) { rec ->
                     CaptureRow(
                         record = rec,
-                        onUpload = { onUpload(rec.id) },
+                        onUpload = { mode -> onUpload(rec.id, mode) },
                         onRetry = { onRetry(rec.id) },
                         onView = { onView(rec.id) },
                         onViewPoints = { onViewPoints(rec.id) },
                         onDelete = { onDeleteCapture(rec.id) },
                         onRedownload = { onRedownload(rec.id) },
+                        onRerun = { mode -> onRerun(rec.id, mode) },
                     )
                 }
             }
