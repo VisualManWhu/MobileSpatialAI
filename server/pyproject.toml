@@ -19,6 +19,8 @@ dependencies = [
     "python-multipart>=0.0.32",
     # Depth Anything V2 (recon/mono_depth.py); 5.x needs torch >= 2.6.
     "transformers>=4.45,<5",
+    # CPU SIFT + mapper for precise mode (recon/precise_pose.py)
+    "pycolmap==4.2.1",
 ]
 
 [project.scripts]
@@ -46,6 +48,7 @@ filterwarnings = [
 ]
 markers = [
     "gpu: needs a CUDA GPU (auto-skipped when torch.cuda.is_available() is False)",
+    "slow: CPU-heavy (pycolmap SIFT + mapper), minutes not seconds",
 ]
 
 # torch 2.4.x + CUDA 12.4 matches the gsplat "pt24cu124" prebuilt wheel tag.

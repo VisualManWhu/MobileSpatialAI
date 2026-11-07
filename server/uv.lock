@@ -566,6 +566,19 @@ wheels = [
 ]
 
 [[package]]
+name = "pycolmap"
+version = "4.2.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/45/64/0df767862af0df86021b9c3ab963c66359c9e3ff152c75be0c21d6c27ddf/pycolmap-4.2.1-cp310-cp310-macosx_14_0_arm64.whl", hash = "sha256:a5e55b2f1bae79c0e3cefe47d56d1efff800cb25223d38ec0ef186b6670835c3", size = 20711589, upload-time = "2026-09-29T17:04:12.055Z" },
+    { url = "https://files.pythonhosted.org/packages/54/f7/4a76c54fdcb33cfff809f7718210d396a15c0cd01bcd4d3b0ef7f723c6cc/pycolmap-4.2.1-cp310-cp310-manylinux_2_28_x86_64.whl", hash = "sha256:5fb7c4100af76efb077cd0da3c78b3e5289a70de6131da0d816ad45e2e69d007", size = 38174040, upload-time = "2026-09-29T17:04:16.672Z" },
+    { url = "https://files.pythonhosted.org/packages/23/2b/6d18a22d59f88c315fc993c93136ce3b675c0bc35ad09ff7dc19b1ccc5e4/pycolmap-4.2.1-cp310-cp310-win_amd64.whl", hash = "sha256:ec6642d8ec11bb1dfeb9b6ed552a650c248ceb8887a0e8825be42cac27cf38ca", size = 23957424, upload-time = "2026-09-29T17:04:19.901Z" },
+]
+
+[[package]]
 name = "pydantic"
 version = "2.14.2"
 source = { registry = "https://pypi.org/simple" }
@@ -676,6 +689,7 @@ dependencies = [
     { name = "gsplat", marker = "sys_platform == 'linux'" },
     { name = "numpy" },
     { name = "pillow" },
+    { name = "pycolmap" },
     { name = "pydantic" },
     { name = "python-multipart" },
     { name = "scipy" },
@@ -699,6 +713,7 @@ requires-dist = [
     { name = "gsplat", marker = "sys_platform == 'linux'", specifier = "==1.5.3", index = "https://docs.gsplat.studio/whl/pt24cu124" },
     { name = "numpy", specifier = ">=1.26" },
     { name = "pillow", specifier = ">=10.0" },
+    { name = "pycolmap", specifier = "==4.2.1" },
     { name = "pydantic", specifier = ">=2.5" },
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "scipy", specifier = ">=1.11" },
