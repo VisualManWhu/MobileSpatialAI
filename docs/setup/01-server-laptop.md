@@ -90,6 +90,16 @@ bash server/scripts/install.sh
 首次会下载约 3 GB（PyTorch 等），需几分钟，请保持网络畅通。最后出现 `[成功] 安装完成，GPU 可用。` 即成功。
 出现 `[失败]` 时，按屏幕上的中文提示处理，然后可以直接重新运行同一条命令（脚本可重复执行）。
 
+高精模式用的 COLMAP（`pycolmap`，纯 CPU 版，不需要额外的 CUDA 组件）随 `uv sync` 一起装好，没有单独步骤。
+已经装过服务端的机器升级代码后再跑一次上面的安装命令即可。验证：
+
+```bash
+cd /mnt/d/projects/Recon3D/server && uv run python -c "import pycolmap; print(pycolmap.__version__)"
+```
+
+打印 `4.2.1`。没装上时高精任务不会失败，而是按快速模式重建，完成后状态写"完成（高精位姿失败，已按快速模式重建）"，
+`data/jobs/<id>/log.txt` 里有 `ImportError`。
+
 ## 第 5 步：启动服务
 
 ```bash
