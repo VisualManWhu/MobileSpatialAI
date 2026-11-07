@@ -47,7 +47,7 @@ def assign_gaussians(
         if lab is None:
             lab = torch.zeros(m.mask.shape, dtype=torch.int32)
             labels[m.frame] = lab
-        lab[(torch.from_numpy(m.mask) & (lab == 0))] = int(m.object_id)
+        lab[(torch.from_numpy(np.ascontiguousarray(m.mask)) & (lab == 0))] = int(m.object_id)
 
     pos_all = torch.from_numpy(np.asarray(positions, dtype=np.float32))
     w2c = torch.from_numpy(np.linalg.inv(np.asarray(c2w_cv, dtype=np.float64))).float()
