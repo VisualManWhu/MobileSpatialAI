@@ -134,7 +134,7 @@ class ApiClientTest {
         server.enqueue(received(4194304)); server.enqueue(received(8388608)); server.enqueue(received(8388613))
         server.enqueue(finished())
         val l = RecordingListener()
-        assertEquals("abcdefabcdef", client.upload(zip, null, l))
+        assertEquals("abcdefabcdef", client.upload(zip, null, "fast", l))
         val create = server.takeRequest()
         assertEquals("POST", create.method); assertEquals("/api/v1/uploads", create.path)
         val body = Json.parseToJsonElement(create.body.readUtf8()).jsonObject
@@ -162,7 +162,7 @@ class ApiClientTest {
         server.enqueue(received(6291456))
         server.enqueue(finished())
         val l = RecordingListener()
-        client.upload(zip, "abcdefabcdef", l)
+        client.upload(zip, "abcdefabcdef", "fast", l)
         val get = server.takeRequest()
         assertEquals("GET", get.method); assertEquals("/api/v1/uploads/abcdefabcdef", get.path)
         assertEquals("1000", server.takeRequest().getHeader("Upload-Offset"))
@@ -179,7 +179,7 @@ class ApiClientTest {
         server.enqueue(received(100))
         server.enqueue(finished())
         val l = RecordingListener()
-        noSleep.upload(zip, null, l)
+        noSleep.upload(zip, null, "fast", l)
         assertEquals(listOf(1), l.retries)
         server.takeRequest(); server.takeRequest()
         assertEquals("GET", server.takeRequest().method)
@@ -195,7 +195,7 @@ class ApiClientTest {
         server.enqueue(received(3))
         server.enqueue(finished())
         val l = RecordingListener()
-        noSleep.upload(zip, null, l)
+        noSleep.upload(zip, null, "fast", l)
         assertEquals(listOf(1), l.retries)
     }
 
@@ -204,7 +204,7 @@ class ApiClientTest {
         server.enqueue(created())
         repeat(31) { server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.DISCONNECT_AT_START)) }
         val l = RecordingListener()
-        val e = apiError { noSleep.upload(zip, null, l) }
+        val e = apiError { noSleep.upload(zip, null, "fast", l) }
         assertEquals(ApiClient.MSG_UNREACHABLE, e.messageZh); assertEquals(30, l.retries.size)
     }
 
@@ -212,7 +212,7 @@ class ApiClientTest {
         val zip = tmpZip(10)
         server.enqueue(MockResponse().setResponseCode(404).setBody("""{"detail":"上传不存在"}"""))
         server.enqueue(MockResponse().setBody("""{"job_id":"000000000000","state":"training","progress":0.1,"message":"训练中"}"""))
-        assertEquals("000000000000", client.upload(zip, "000000000000", RecordingListener()))
+        assertEquals("000000000000", client.upload(zip, "000000000000", "fast", RecordingListener()))
         server.takeRequest()
         assertEquals("/api/v1/jobs/000000000000", server.takeRequest().path)
         assertEquals(2, server.requestCount)
@@ -226,7 +226,7 @@ class ApiClientTest {
         server.enqueue(received(10))
         server.enqueue(finished("111111111111"))
         val l = RecordingListener()
-        assertEquals("111111111111", client.upload(zip, "000000000000", l))
+        assertEquals("111111111111", client.upload(zip, "000000000000", "fast", l))
         assertEquals(listOf("111111111111"), l.created)
     }
 
@@ -235,7 +235,7 @@ class ApiClientTest {
         server.enqueue(created())
         server.enqueue(MockResponse().setResponseCode(413).setBody("""{"detail":"上传文件过大，上限 4 GB"}"""))
         val l = RecordingListener()
-        val e = apiError { noSleep.upload(zip, null, l) }
+        val e = apiError { noSleep.upload(zip, null, "fast", l) }
         assertEquals("上传文件过大，上限 4 GB", e.messageZh); assertEquals(413, e.code)
         assertTrue(l.retries.isEmpty()); assertEquals(2, server.requestCount)
     }
@@ -245,13 +245,13 @@ class ApiClientTest {
         server.enqueue(created())
         server.enqueue(received(3))
         server.enqueue(MockResponse().setResponseCode(422).setBody("""{"detail":"文件校验失败，请重新上传"}"""))
-        val e = apiError { client.upload(zip, null, RecordingListener()) }
+        val e = apiError { client.upload(zip, null, "fast", RecordingListener()) }
         assertEquals("文件校验失败，请重新上传", e.messageZh); assertEquals(422, e.code)
     }
 
     @Test fun uploadTooLargeUsesServerDetail() {
         server.enqueue(MockResponse().setResponseCode(413).setBody("""{"detail":"上传文件过大，上限 4 GB"}"""))
-        assertEquals("上传文件过大，上限 4 GB", apiError { client.upload(tmpZip(16), null, RecordingListener()) }.messageZh)
+        assertEquals("上传文件过大，上限 4 GB", apiError { client.upload(tmpZip(16), null, "fast", RecordingListener()) }.messageZh)
     }
 
     @Test fun uploadValidationErrorWithListDetailGivesCode() {
@@ -259,7 +259,7 @@ class ApiClientTest {
         server.enqueue(MockResponse().setResponseCode(422).setBody(
             """{"detail":[{"loc":["body","size"],"msg":"Field required","type":"missing"}]}"""
         ))
-        assertEquals("计算端返回错误：HTTP 422", apiError { client.upload(tmpZip(16), null, RecordingListener()) }.messageZh)
+        assertEquals("计算端返回错误：HTTP 422", apiError { client.upload(tmpZip(16), null, "fast", RecordingListener()) }.messageZh)
     }
 
     // --- job ---
@@ -379,5 +379,31 @@ class ApiClientTest {
         server.shutdown()
         val e = assertThrows(ApiException::class.java) { runBlocking { client.deleteJob("abc123abc123") } }
         assertEquals(ApiClient.MSG_UNREACHABLE, e.messageZh)
+    }
+
+    // --- mode / rerun ---
+
+    @Test fun uploadSendsModeInCreateBody() = runTest {
+        val zip = tmpZip(10)
+        server.enqueue(created()); server.enqueue(received(10)); server.enqueue(finished())
+        client.upload(zip, null, "precise", RecordingListener())
+        val body = Json.parseToJsonElement(server.takeRequest().body.readUtf8()).jsonObject
+        assertEquals("precise", body["mode"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun rerunJobPostsModeAndReturnsNewId() = runTest {
+        server.enqueue(MockResponse().setResponseCode(201).setBody("""{"job_id":"bbbbbbbbbbbb"}"""))
+        assertEquals("bbbbbbbbbbbb", client.rerunJob("aaaaaaaaaaaa", "precise"))
+        val req = server.takeRequest()
+        assertEquals("POST", req.method); assertEquals("/api/v1/jobs/aaaaaaaaaaaa/rerun", req.path)
+        assertEquals("precise", Json.parseToJsonElement(req.body.readUtf8()).jsonObject["mode"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun rerunJobErrorsCarryServerDetailAndCode() {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"detail":"任务不存在"}"""))
+        val e = apiError { client.rerunJob("aaaaaaaaaaaa", "fast") }
+        assertEquals("任务不存在", e.messageZh); assertEquals(404, e.code)
+        server.enqueue(MockResponse().setResponseCode(409).setBody("""{"detail":"上传未完成"}"""))
+        assertEquals(409, apiError { client.rerunJob("aaaaaaaaaaaa", "fast") }.code)
     }
 }

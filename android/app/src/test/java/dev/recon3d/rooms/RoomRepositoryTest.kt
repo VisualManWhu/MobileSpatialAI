@@ -93,4 +93,12 @@ class RoomRepositoryTest {
         repo.removeRoom("room-missing") // no-op
         assertEquals(listOf(b.id), RoomRepository(dir).roomsNow().map { it.id })
     }
+
+    @Test fun modePersistsAndDefaultsToFast() {
+        val room = repo.createRoom("客厅")
+        repo.addCapture(room.id, CaptureRecord(id = "cap-1", zipPath = "/x.zip", mode = "precise"))
+        assertEquals("precise", RoomRepository(dir).capture(room.id, "cap-1").mode)
+        assertEquals("fast", CaptureRecord(id = "c", zipPath = "z").mode)
+        assertEquals(MODE_FAST, "fast"); assertEquals(MODE_PRECISE, "precise")
+    }
 }

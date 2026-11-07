@@ -208,7 +208,8 @@ class UploadViewModel(
                 log("could not record $what for $roomId/$captureId", e)
             }
         }
-        val jobId = api.upload(zip, resumeId, object : UploadListener {
+        val mode = repo.capture(roomId, captureId).mode
+        val jobId = api.upload(zip, resumeId, mode, object : UploadListener {
             override fun onCreated(uploadId: String) =
                 record("upload id") { it.copy(uploadId = uploadId, progress = 0f, serverIds = it.serverIds.plusDistinct(uploadId)) }
 

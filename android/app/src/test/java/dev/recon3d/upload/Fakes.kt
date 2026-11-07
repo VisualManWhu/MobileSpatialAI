@@ -46,9 +46,29 @@ internal class FakeApi : Api {
     /** When true, onCreated fires only after [uploadDelayMs]: the record has no ids while the upload is stuck at start. */
     var createdLate = false
 
-    override suspend fun upload(zip: File, uploadId: String?, listener: UploadListener): String {
+    /** The mode the view model passed on the last upload call. */
+    var lastMode: String? = null
+    /** Every mode passed to upload, in order. */
+    val modes = mutableListOf<String>()
+
+    /** (jobId, mode) pairs passed to rerunJob, in order. */
+    val rerunCalls = mutableListOf<Pair<String, String>>()
+    /** Job id rerunJob returns. */
+    var rerunResult = "j2"
+    /** Thrown once by the next rerunJob call when set. */
+    var rerunFailure: ApiException? = null
+
+    override suspend fun rerunJob(jobId: String, mode: String): String {
+        rerunCalls += jobId to mode
+        rerunFailure?.let { rerunFailure = null; throw it }
+        return rerunResult
+    }
+
+    override suspend fun upload(zip: File, uploadId: String?, mode: String, listener: UploadListener): String {
         uploads++
         lastUploadId = uploadId
+        lastMode = mode
+        modes += mode
         if (uploadId == null && !createdLate) listener.onCreated("u1")
         uploadFailure?.let { uploadFailure = null; throw it }
         retrySteps.forEach(listener::onRetry)

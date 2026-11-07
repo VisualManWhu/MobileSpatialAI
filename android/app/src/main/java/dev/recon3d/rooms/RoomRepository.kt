@@ -22,6 +22,10 @@ data class Room(
     val captures: List<CaptureRecord> = emptyList(),
 )
 
+/** Reconstruction modes (server `mode` field, docs/api.md). */
+const val MODE_FAST = "fast"
+const val MODE_PRECISE = "precise"
+
 /**
  * One capture zip and its server-side life. [state] is one of
  * `local | uploading | queued | training | exporting | done | failed`.
@@ -31,6 +35,8 @@ data class CaptureRecord(
     val id: String,
     val zipPath: String,
     val kind: String = "model",
+    /** [MODE_FAST] or [MODE_PRECISE]: the mode of the current/last server job (records from older versions: fast). */
+    val mode: String = MODE_FAST,
     val jobId: String? = null,
     /** Server upload id while `uploading` (resumable protocol); kept on transport failure so retry continues. */
     val uploadId: String? = null,

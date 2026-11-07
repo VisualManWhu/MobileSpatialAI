@@ -54,9 +54,10 @@ private class SettingsBackedApi(private val settings: ServerSettings) : Api {
         ApiClient(settings.baseUrl.first() ?: throw ApiException(MSG_NO_SERVER))
 
     override suspend fun health(): Health = client().health()
-    override suspend fun upload(zip: File, uploadId: String?, listener: UploadListener): String =
-        client().upload(zip, uploadId, listener)
+    override suspend fun upload(zip: File, uploadId: String?, mode: String, listener: UploadListener): String =
+        client().upload(zip, uploadId, mode, listener)
     override suspend fun job(id: String): JobStatus = client().job(id)
+    override suspend fun rerunJob(jobId: String, mode: String): String = client().rerunJob(jobId, mode)
     override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) =
         client().downloadScene(id, dest, onRetry)
     override suspend fun deleteJob(jobId: String) = client().deleteJob(jobId)

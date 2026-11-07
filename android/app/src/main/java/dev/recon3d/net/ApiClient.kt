@@ -53,11 +53,18 @@ interface Api {
     /**
      * Uploads a capture zip with the resumable protocol and returns the job id. [uploadId] is the id
      * persisted from an interrupted attempt (null = start a new upload); the transfer survives dropped
-     * connections by asking the server where to continue.
+     * connections by asking the server where to continue. [mode] (`fast` | `precise`) is the
+     * reconstruction mode the job runs with; it is sent when the upload is registered.
      */
-    suspend fun upload(zip: File, uploadId: String?, listener: UploadListener): String
+    suspend fun upload(zip: File, uploadId: String?, mode: String, listener: UploadListener): String
 
     suspend fun job(id: String): JobStatus
+
+    /**
+     * `POST /jobs/{id}/rerun`: queues a new job over [jobId]'s capture in [mode] and returns its id.
+     * 404 (job gone) and 409 (still uploading) surface as [ApiException] with the server detail and code.
+     */
+    suspend fun rerunJob(jobId: String, mode: String): String
 
     /**
      * Downloads `scene.splat` to [dest], resuming a leftover `dest.part` with `Range`; [dest] only
@@ -88,7 +95,7 @@ class ApiClient(
     override suspend fun health(): Health =
         call(get("health")) { decode<Health>(it.body!!.string()) }
 
-    override suspend fun upload(zip: File, uploadId: String?, listener: UploadListener): String {
+    override suspend fun upload(zip: File, uploadId: String?, mode: String, listener: UploadListener): String {
         val size = zip.length()
         val sha = withContext(Dispatchers.IO) { sha256Hex(zip) }
         var id: String? = uploadId
@@ -141,7 +148,7 @@ class ApiClient(
                 }
                 id = null
             }
-            val body = json.encodeToString(UploadCreateBody.serializer(), UploadCreateBody(size, sha))
+            val body = json.encodeToString(UploadCreateBody.serializer(), UploadCreateBody(size, sha, mode))
             val created = call(Request.Builder().url(url("uploads")).post(body.toRequestBody(JSON)).build()) {
                 decode<UploadCreated>(it.body!!.string())
             }
@@ -196,6 +203,12 @@ class ApiClient(
 
     override suspend fun job(id: String): JobStatus =
         call(get("jobs", id)) { decode<JobStatus>(it.body!!.string()) }
+
+    override suspend fun rerunJob(jobId: String, mode: String): String {
+        val body = json.encodeToString(RerunBody.serializer(), RerunBody(mode))
+        val request = Request.Builder().url(url("jobs", jobId, "rerun")).post(body.toRequestBody(JSON)).build()
+        return call(request) { decode<JobCreated>(it.body!!.string()).jobId }
+    }
 
     override suspend fun deleteJob(jobId: String) {
         val request = Request.Builder().url(url("jobs", jobId)).delete().build()
@@ -310,7 +323,10 @@ class ApiClient(
     }
 
     @kotlinx.serialization.Serializable
-    private data class UploadCreateBody(val size: Long, val sha256: String)
+    private data class UploadCreateBody(val size: Long, val sha256: String, val mode: String)
+
+    @kotlinx.serialization.Serializable
+    private data class RerunBody(val mode: String)
 
     companion object {
         private const val TAG = "ApiClient"
