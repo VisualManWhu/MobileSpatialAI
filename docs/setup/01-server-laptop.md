@@ -100,6 +100,9 @@ cd /mnt/d/projects/Recon3D/server && uv run python -c "import pycolmap; print(py
 打印 `4.2.1`。没装上时高精任务不会失败，而是按快速模式重建，完成后状态写"完成（高精位姿失败，已按快速模式重建）"，
 `data/jobs/<id>/log.txt` 里有 `ImportError`。
 
+物体识别（第二期）用的 Grounding DINO 和 SAM 2 也随 `uv sync` 装好（`transformers` + `torchvision`）。模型权重约 1 GB，
+**第一次点"识别物体"时**才从 Hugging Face 下载，会多等一两分钟；下载失败时手机上显示"模型下载失败，请检查网络"，联网后重试即可。
+
 ## 第 5 步：启动服务
 
 ```bash

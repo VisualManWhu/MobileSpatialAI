@@ -44,7 +44,8 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
 ## GET /jobs/{id}
 
 ```json
-{"job_id":"3f9c0a1b2d4e","state":"training","progress":0.42,"message":"训练中","mode":"fast"}
+{"job_id":"3f9c0a1b2d4e","state":"training","progress":0.42,"message":"训练中","mode":"fast",
+ "objects":{"state":"none","progress":0.0,"message":"","count":0}}
 ```
 
 - `state`: `queued` | `training` | `exporting` | `done` | `failed`
@@ -53,6 +54,10 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
   高精模式位姿阶段 `state` 仍为 `training`，`message` 依次为 `位姿优化 (特征提取)` / `位姿优化 (特征匹配)` / `位姿优化 (全局优化)`；
   位姿优化失败时自动按快速模式重建，完成后 `message` 为 `完成（高精位姿失败，已按快速模式重建）`，原因在服务端 `log.txt`。
 - `mode`: `fast` | `precise`（老任务的 status.json 没有该字段时按 `fast`）。
+- `objects`: 物体识别（第二期）状态块，`GET /jobs` 的每行里也有。`state`: `none`（没跑过）| `queued` | `running` | `done` | `failed`；
+  `progress` 0..1（检测 0→0.6，合并 →0.75，归属 →0.95，截图 →1.0）；`message` 运行中为 `识别物体 (检测)` / `(合并)` / `(归属)` / `(截图)`，
+  失败时为原因（`显存不足，请降低分辨率或改用服务器`、`模型下载失败，请检查网络`、`识别失败，请重试；…`）；`count` 完成后的物体数。
+  服务重启时 `queued` / `running` 的识别回到 `queued` 自动续跑；任务本身的 `state` 不受识别影响。
 
 任务不存在：`404`，`{"detail":"任务不存在"}`。
 
@@ -65,6 +70,33 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
 - 源任务不存在 / 没有拍摄包：`404`，`{"detail":"任务不存在"}`
 - id 是还没 finish 的断点续传上传：`409`，`{"detail":"上传未完成"}`
 - `mode` 非法：`422`
+
+## POST /jobs/{id}/objects
+
+对已完成的任务按需跑物体识别（手机"识别物体"按钮）。无请求体。结果已存在时重新识别并覆盖。
+
+- 成功：`202`，`{"job_id":"…","objects":{"state":"queued",…}}`
+- 任务不存在：`404`，`{"detail":"任务不存在"}`
+- 任务还没 `done` 或没有 `capture.zip`：`409`，`{"detail":"任务尚未完成"}`
+- 已在排队 / 识别中：`409`，`{"detail":"正在识别"}`
+
+识别中的任务不能删除（`DELETE` 返回 `409`，同训练中）。
+
+## GET /jobs/{id}/objects.zip
+
+物体表产物包（`application/zip`），`objects.state == done` 时可下载，否则 `404`，`{"detail":"没有物体表"}`。内容：
+
+- `objects.json`：
+  ```json
+  {"version": 1, "job_id": "…", "frames_used": 225, "gaussians": 983112,
+   "objects": [{"id": 1, "label": "chair", "label_zh": "椅子", "score": 0.64, "views": 17,
+                "center": [x, y, z], "bbox": {"min": [x, y, z], "max": [x, y, z]},
+                "gaussian_count": 23410, "thumb": "thumbs/1.jpg"}],
+   "relations": [{"a": 3, "rel": "on", "b": 7}]}
+  ```
+  `id` 从 1 起连续；坐标为场景世界系（与 `scene.splat` 一致，+Y 向上）；`rel` ∈ `on` / `in` / `next_to` / `left_of` / `right_of`。
+- `objects.bin`：`gaussians` 个 little-endian `uint16`，第 i 个是 `scene.splat` 第 i 个高斯所属物体 `id`，0 = 无。
+- `thumbs/{id}.jpg`：代表截图（长边 256）。
 
 ## GET /jobs/{id}/scene.splat
 
