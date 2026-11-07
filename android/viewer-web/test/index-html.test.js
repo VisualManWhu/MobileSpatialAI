@@ -52,3 +52,8 @@ test("index.html has the height rail beside the move stick", () => {
   const html = readFileSync(new URL("../src/index.html", import.meta.url), "utf8");
   assert.match(html, /id="stick-climb" class="stick"/);
 });
+
+test("the roam toggle leaves the top-right corner to the app's objects chip", () => {
+  const html = readFileSync(new URL("../src/index.html", import.meta.url), "utf8");
+  assert.match(html, /#roam-toggle \{[^}]*top: 56px/);
+});

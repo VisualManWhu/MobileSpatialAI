@@ -11,12 +11,15 @@
 //   flyTo({x,y,z}, {x,y,z} lookAt, ms)  -> Promise<void>    (smooth ease-in-out)
 //   setCameraHome()
 //   setRoam(on)                         漫游 (free-fly) mode on/off; also the page's own button
+//   loadObjects(url)                    -> Promise<number>  per-splat object ids (objects.bin)
+//   highlightObject(id)                 id > 0: dim everything else; 0: restore
+//   flyToObject(id, center, bboxMin, bboxMax) -> Promise<void>  flyTo a pose in front of it + highlight
 // Coordinates are the scene WORLD frame (same as .splat positions). That frame is ARCore's
 // world (+Y up), identical to three.js's, so no conversion is applied — see worldToThree().
 
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
-import { SparkRenderer, SplatMesh, SplatFileType } from "@sparkjsdev/spark";
+import { RgbaArray, SparkRenderer, SplatMesh, SplatFileType } from "@sparkjsdev/spark";
 import {
   splatCount,
   robustBounds,
@@ -29,6 +32,7 @@ import {
 } from "./scene-math.js";
 import { forwardOf, roamStep, yawPitchFromDirection } from "./roam-math.js";
 import { attachJoystick } from "./joystick.js";
+import { dimRgba, extractRgba, flyPoseFor, parseObjectIds } from "./objects-math.js";
 
 const MSG_LOAD_FAILED = "场景文件加载失败";
 const FOV = 60;
@@ -177,6 +181,9 @@ function roamFrame(now) {
 
 let mesh = null;
 let home = null;
+let sceneRgba = null; // Uint8Array[N*4]: original rgba of the loaded .splat (for highlighting)
+let objectIds = null; // Uint16Array[N] from objects.bin, or null
+let highlighted = 0;
 let flight = null; // { from, to, fromTarget, toTarget, start, duration, resolve }
 let frameQueued = false;
 
@@ -282,6 +289,7 @@ async function loadScene(url, homeHint = null) {
   const bytes = await res.arrayBuffer();
   const count = splatCount(bytes.byteLength); // throws on empty / truncated
   const bounds = robustBounds(bytes); // computed before Spark takes the buffer
+  const rgba = extractRgba(bytes); // likewise: Spark may transfer the buffer to its worker
 
   const next = new SplatMesh({ fileBytes: bytes, fileType: SplatFileType.SPLAT, fileName: "scene.splat" });
   try {
@@ -297,12 +305,69 @@ async function loadScene(url, homeHint = null) {
   // No transform: splat world (ARCore, +Y up) == three.js world.
   mesh = next;
   scene.add(mesh);
+  clearObjects();
+  sceneRgba = rgba;
 
   home = homeView(bounds, FOV, camera.aspect, homeHint);
   setCameraHome();
   const toggle = document.getElementById("roam-toggle");
   if (toggle) toggle.hidden = false; // nothing to roam through before the first scene is up
   return count;
+}
+
+/** Drops the object ids and any highlight (a new scene has its own objects.bin). */
+function clearObjects() {
+  objectIds = null;
+  highlighted = 0;
+  if (mesh && mesh.splatRgba) {
+    mesh.splatRgba.dispose();
+    mesh.splatRgba = null;
+    mesh.updateGenerator();
+  }
+}
+
+/** Loads objects.bin for the current scene; resolves to the number of distinct objects. */
+async function loadObjects(url) {
+  if (!mesh || !sceneRgba) throw new Error("no scene loaded");
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  const ids = parseObjectIds(await res.arrayBuffer(), sceneRgba.length / 4);
+  const wasHighlighted = highlighted;
+  clearObjects();
+  objectIds = ids;
+  const seen = new Set();
+  for (const id of ids) if (id) seen.add(id);
+  if (wasHighlighted) highlightObject(wasHighlighted);
+  return seen.size;
+}
+
+/**
+ * Highlights one object: every other splat is greyed and faded through Spark's per-splat rgba
+ * override (SplatMesh.splatRgba); 0 restores the scene. Needs loadObjects() first.
+ */
+function highlightObject(id) {
+  if (!mesh || !sceneRgba) return;
+  id = Number(id) || 0;
+  if (mesh.splatRgba) {
+    mesh.splatRgba.dispose();
+    mesh.splatRgba = null;
+  }
+  highlighted = 0;
+  if (id > 0 && objectIds) {
+    mesh.splatRgba = new RgbaArray({ array: dimRgba(sceneRgba, objectIds, id), count: objectIds.length });
+    highlighted = id;
+  }
+  mesh.updateGenerator();
+  requestRender();
+}
+
+/** Flies to a viewpoint in front of the object (see objects-math.flyPoseFor), then highlights it. */
+function flyToObject(id, center, bboxMin, bboxMax) {
+  if (!camera) throw new Error("viewer not initialised");
+  const homeLook = home ? { x: home.target.x - home.position.x, y: home.target.y - home.position.y, z: home.target.z - home.position.z } : null;
+  const pose = flyPoseFor(center, bboxMin, bboxMax, vec(camera.position), homeLook);
+  highlightObject(id);
+  return flyTo(pose.position, pose.lookAt, 1000);
 }
 
 /**
@@ -335,5 +400,8 @@ window.loadScene = loadScene;
 window.flyTo = flyTo;
 window.setCameraHome = setCameraHome;
 window.setRoam = setRoam;
+window.loadObjects = loadObjects;
+window.highlightObject = highlightObject;
+window.flyToObject = flyToObject;
 
 boot();
