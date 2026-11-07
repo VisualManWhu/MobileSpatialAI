@@ -21,6 +21,8 @@ dependencies = [
     "transformers>=4.45,<5",
     # CPU SIFT + mapper for precise mode (recon/precise_pose.py)
     "pycolmap==4.2.1",
+    # SAM 2's image processor (objects/detect.py); same CUDA build as torch (see [tool.uv.sources]).
+    "torchvision==0.19.1; sys_platform == 'linux'",
 ]
 
 [project.scripts]
@@ -65,4 +67,5 @@ explicit = true
 
 [tool.uv.sources]
 torch = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
+torchvision = [{ index = "pytorch-cu124", marker = "sys_platform == 'linux'" }]
 gsplat = [{ index = "gsplat-pt24cu124", marker = "sys_platform == 'linux'" }]
