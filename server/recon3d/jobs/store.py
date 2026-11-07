@@ -17,13 +17,14 @@ import threading
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import BinaryIO
 
 DEFAULT_MAX_UPLOAD_BYTES = 4 * 1024**3
 CHUNK = 1024 * 1024
 ACTIVE_STATES = ("queued", "training", "exporting")
+OBJECTS_STATES = ("none", "queued", "running", "done", "failed")
 RESTART_MESSAGE = "服务重启，任务中断，请重新上传"
 RESUMABLE_MAX_AGE_S = 24 * 3600
 _JOB_ID = re.compile(r"[0-9a-f]{12}")
@@ -64,6 +65,14 @@ class JobActive(Exception):
     """delete() while the worker is training/exporting the job (its directory is being written)."""
 
 
+class JobNotDone(Exception):
+    """Object recognition asked for a job that is not done (or has no capture.zip)."""
+
+
+class ObjectsActive(Exception):
+    """Object recognition already queued or running for this job."""
+
+
 class UploadInProgress(Exception):
     """rerun() of an id that is still a resumable upload (no capture.zip yet)."""
 
@@ -89,6 +98,16 @@ class ResumableInfo:
 
 
 @dataclass(frozen=True)
+class ObjectsStatus:
+    """Phase-2 object recognition attached to a done job (spec 2026-11-07 §4.1)."""
+
+    state: str = "none"  # OBJECTS_STATES
+    progress: float = 0.0
+    message: str = ""
+    count: int = 0
+
+
+@dataclass(frozen=True)
 class JobStatus:
     job_id: str
     state: str
@@ -96,6 +115,11 @@ class JobStatus:
     message: str
     created_at: float
     mode: str = "fast"  # "fast" | "precise"; absent in status.json written before precise mode
+    objects: dict = field(default_factory=lambda: asdict(ObjectsStatus()))  # absent before phase 2
+
+    @property
+    def objects_status(self) -> ObjectsStatus:
+        return ObjectsStatus(**{**asdict(ObjectsStatus()), **self.objects})
 
 
 class Upload:
@@ -138,7 +162,8 @@ class JobStore:
         self.jobs_dir = self.data_dir / "jobs"
         self.jobs_dir.mkdir(parents=True, exist_ok=True)
         self.max_upload_bytes = max_upload_bytes
-        self.queue: queue.Queue[str] = queue.Queue()  # ids of jobs created by this process
+        # Work items: ("recon", job_id) for a reconstruction, ("objects", job_id) for recognition.
+        self.queue: queue.Queue[tuple[str, str]] = queue.Queue()
         self._lock = threading.Lock()
         self._upload_locks: dict[str, threading.Lock] = {}
 
@@ -163,7 +188,7 @@ class JobStore:
     def _commit(self, job_id: str, size: int, mode: str = "fast") -> None:
         self._write(JobStatus(job_id, "queued", 0.0, "排队中", time.time(), mode))
         self.log(job_id, f"created ({size} bytes), state=queued, mode={mode}")
-        self.queue.put(job_id)
+        self.queue.put(("recon", job_id))
 
     def rerun(self, job_id: str, mode: str) -> str:
         """Queue a new job over an existing job's capture.zip (hard-linked, copied if that fails).
@@ -221,6 +246,36 @@ class JobStore:
             self.log(job_id, f"state={new.state} message={new.message}")
         return new
 
+    # --- object recognition (phase 2) ---
+
+    def request_objects(self, job_id: str) -> None:
+        """Queue object recognition for a done job. Raises KeyError (unknown id), JobNotDone (not
+        done or no capture.zip) or ObjectsActive (already queued / running). A done result is redone."""
+        s = self.get(job_id)
+        if s is None:
+            raise KeyError(job_id)
+        if s.state != "done" or not (self.job_dir(job_id) / "capture.zip").is_file():
+            raise JobNotDone(job_id)
+        if s.objects_status.state in ("queued", "running"):
+            raise ObjectsActive(job_id)
+        self.update_objects(job_id, state="queued", progress=0.0, message="排队中", count=0)
+        self.log(job_id, "objects requested")
+        self.queue.put(("objects", job_id))
+
+    def update_objects(self, job_id: str, **fields) -> JobStatus:
+        with self._lock:
+            old = self.get(job_id)
+            if old is None:
+                raise KeyError(job_id)
+            new_objects = {**asdict(old.objects_status), **fields}
+            if new_objects["state"] not in OBJECTS_STATES:
+                raise ValueError(new_objects["state"])
+            new = JobStatus(**{**asdict(old), "objects": new_objects})
+            self._write(new)
+        if new.objects["state"] != old.objects_status.state:
+            self.log(job_id, f"objects state={new.objects['state']} message={new.objects['message']}")
+        return new
+
     def recover_after_restart(self) -> None:
         """Jobs left active by a previous process can never finish; mark them failed.
 
@@ -232,6 +287,10 @@ class JobStore:
             s = self.get(d.name)
             if s is not None and s.state in ACTIVE_STATES:
                 self.update(s.job_id, state="failed", message=RESTART_MESSAGE)
+            if s is not None and s.objects_status.state in ("queued", "running"):
+                # capture.zip and the scene are still there: recognition simply runs again.
+                self.update_objects(s.job_id, state="queued", progress=0.0, message="排队中")
+                self.queue.put(("objects", s.job_id))
             info = self.resumable(d.name)
             if info is not None:
                 self._write_upload_meta(info, received=self._part_size(d.name))
@@ -254,7 +313,7 @@ class JobStore:
         try:
             with self._lock:  # update() holds it for its read-modify-write; no status write interleaves
                 s = self.get(job_id)
-                if s is not None and s.state in ("training", "exporting"):
+                if s is not None and (s.state in ("training", "exporting") or s.objects_status.state == "running"):
                     raise JobActive(job_id)
                 shutil.rmtree(d, ignore_errors=True)
                 self._upload_locks.pop(job_id, None)

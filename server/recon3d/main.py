@@ -12,13 +12,17 @@ def build_app(profile: Profile, data_dir: Path, max_upload_bytes: int = DEFAULT_
     from recon3d.api.app import create_app
     from recon3d.jobs.pipeline import run_pipeline
     from recon3d.jobs.worker import Worker
+    from recon3d.objects.pipeline import run_objects
 
     store = JobStore(data_dir, max_upload_bytes=max_upload_bytes)
 
     def pipeline(job_dir: Path, mode: str, on_progress) -> str | None:
         return run_pipeline(job_dir, profile, on_progress, mode)
 
-    return create_app(store, Worker(store, pipeline), profile)
+    def objects_pipeline(job_dir: Path, on_progress) -> int:
+        return run_objects(job_dir, profile, on_progress)
+
+    return create_app(store, Worker(store, pipeline, objects_pipeline), profile)
 
 
 def cli(argv: list[str] | None = None) -> None:

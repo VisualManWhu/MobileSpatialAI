@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from dataclasses import asdict
 from functools import lru_cache
 from typing import Literal
 
@@ -17,7 +18,7 @@ from recon3d.api.status_page import HTML as STATUS_PAGE
 from recon3d.api.upload import FORM_OVERHEAD, receive_capture
 from recon3d.api.upload import too_large as _too_large
 from recon3d.config import Profile
-from recon3d.jobs.store import JobActive, JobStore, UploadBusy, UploadInProgress
+from recon3d.jobs.store import JobActive, JobNotDone, JobStore, ObjectsActive, UploadBusy, UploadInProgress
 from recon3d.jobs.worker import Worker
 
 log = logging.getLogger(__name__)
@@ -26,6 +27,8 @@ NOT_FOUND = "任务不存在"
 NOT_DONE = "任务尚未完成"
 TRAINING = "任务正在训练，完成后再删"
 UPLOAD_INCOMPLETE = "上传未完成"
+OBJECTS_ACTIVE = "正在识别"
+NO_OBJECTS = "没有物体表"
 NO_GPU = "无 GPU"
 
 
@@ -113,13 +116,44 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
                 "capture_bytes": size,
                 "has_scene": s.state == "done" and (d / "scene.splat").is_file(),
                 "mode": s.mode,
+                "objects": asdict(s.objects_status),
             })
         return {"jobs": out}
 
     @api.get("/jobs/{job_id}")
     def get_job(job_id: str):
         s = status_or_404(job_id)
-        return {"job_id": s.job_id, "state": s.state, "progress": s.progress, "message": s.message, "mode": s.mode}
+        return {
+            "job_id": s.job_id,
+            "state": s.state,
+            "progress": s.progress,
+            "message": s.message,
+            "mode": s.mode,
+            "objects": asdict(s.objects_status),
+        }
+
+    @api.post("/jobs/{job_id}/objects", status_code=202)
+    def request_objects(job_id: str):
+        """Queue object recognition over a done job (phase 2); redoing a finished result is allowed."""
+        try:
+            store.request_objects(job_id)
+        except KeyError:
+            raise HTTPException(404, NOT_FOUND) from None
+        except JobNotDone:
+            raise HTTPException(409, NOT_DONE) from None
+        except ObjectsActive:
+            raise HTTPException(409, OBJECTS_ACTIVE) from None
+        log.info("objects requested for job %s", job_id)
+        s = store.get(job_id)
+        return {"job_id": job_id, "objects": asdict(s.objects_status)}
+
+    @api.get("/jobs/{job_id}/objects.zip")
+    def get_objects(job_id: str):
+        s = status_or_404(job_id)
+        path = store.job_dir(job_id) / "objects.zip"
+        if s.objects_status.state != "done" or not path.is_file():
+            raise HTTPException(404, NO_OBJECTS)
+        return FileResponse(path, media_type="application/zip", filename="objects.zip")
 
     @api.post("/jobs/{job_id}/rerun", status_code=201)
     def rerun_job(job_id: str, body: RerunBody):

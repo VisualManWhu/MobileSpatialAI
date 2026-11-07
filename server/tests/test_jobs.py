@@ -13,13 +13,16 @@ from recon3d.jobs.store import (
     ChecksumMismatch,
     IncompleteUpload,
     JobActive,
+    JobNotDone,
     JobStore,
+    ObjectsActive,
     OffsetMismatch,
     UploadBusy,
     UploadInProgress,
     UploadTooLargeError,
 )
 from recon3d.jobs.worker import Worker
+from tests.fixtures.make_capture import make_capture
 
 
 def wait_until(cond, timeout=10.0):
@@ -232,7 +235,7 @@ def test_resumable_roundtrip(tmp_path):
     assert (s.job_dir(jid) / "capture.zip").read_bytes() == data
     assert not (s.job_dir(jid) / "upload.json").exists() and s.resumable(jid) is None
     assert s.finish_resumable(jid) == jid  # idempotent
-    assert s.queue.get_nowait() == jid and s.queue.empty()
+    assert s.queue.get_nowait() == ("recon", jid) and s.queue.empty()
 
 
 def test_resumable_rejects_bad_begin(tmp_path):
@@ -509,7 +512,7 @@ def test_rerun_hardlinks_capture_and_queues(store):
     assert (s.state, s.mode, s.progress) == ("queued", "precise", 0.0)
     first = (d / "log.txt").read_text(encoding="utf-8").splitlines()[0]
     assert first.endswith(f"created from {src} (rerun, mode=precise)")
-    assert store.queue.get_nowait() == src and store.queue.get_nowait() == new
+    assert store.queue.get_nowait() == ("recon", src) and store.queue.get_nowait() == ("recon", new)
 
 
 def test_rerun_missing_or_uploading_source(tmp_path):
@@ -532,3 +535,97 @@ def test_rerun_copies_when_link_fails(store, monkeypatch):
     monkeypatch.setattr(os, "link", no_link)
     new = store.rerun(src, "fast")
     assert (store.job_dir(new) / "capture.zip").read_bytes() == b"zipbytes"
+
+
+# --- objects work (phase 2) ---
+
+
+def _done_job(store, tmp_path):
+    job_id = store.create(io.BytesIO(make_capture(tmp_path, n_frames=2).read_bytes()))
+    store.queue.get_nowait()  # drop the recon work item
+    store.update(job_id, state="done", progress=1.0, message="完成")
+    return job_id
+
+
+def test_request_objects_queues_and_reports(store, tmp_path):
+    job_id = _done_job(store, tmp_path)
+    assert store.get(job_id).objects == {"state": "none", "progress": 0.0, "message": "", "count": 0}
+    store.request_objects(job_id)
+    assert store.queue.get_nowait() == ("objects", job_id)
+    assert store.get(job_id).objects_status.state == "queued"
+    with pytest.raises(ObjectsActive):
+        store.request_objects(job_id)
+    with pytest.raises(KeyError):
+        store.request_objects("nope")
+
+
+def test_request_objects_needs_a_done_job(store, tmp_path):
+    job_id = store.create(io.BytesIO(make_capture(tmp_path, n_frames=2).read_bytes()))
+    with pytest.raises(JobNotDone):
+        store.request_objects(job_id)
+
+
+def test_restart_requeues_objects_work_and_keeps_scene_done(store, tmp_path):
+    job_id = _done_job(store, tmp_path)
+    store.request_objects(job_id)
+    store.queue.get_nowait()
+    store.update_objects(job_id, state="running", progress=0.4)
+    store2 = JobStore(store.data_dir)
+    store2.recover_after_restart()
+    s = store2.get(job_id)
+    assert s.state == "done" and s.objects_status.state == "queued"
+    assert store2.queue.get_nowait() == ("objects", job_id)
+
+
+def test_delete_refused_while_objects_running_allowed_while_queued(store, tmp_path):
+    job_id = _done_job(store, tmp_path)
+    store.request_objects(job_id)
+    store.update_objects(job_id, state="running")
+    with pytest.raises(JobActive):
+        store.delete(job_id)
+    store.update_objects(job_id, state="queued")
+    store.delete(job_id)
+    assert store.get(job_id) is None
+
+
+def test_worker_runs_objects_work_and_records_result(store, tmp_path):
+    job_id = _done_job(store, tmp_path)
+    seen = []
+
+    def objects_pipeline(job_dir, on_progress):
+        on_progress(0.3, "识别物体 (检测)")
+        on_progress(1.0, None)
+        seen.append(job_dir)
+        return 7
+
+    w = Worker(store, lambda d, m, p: None, objects_pipeline=objects_pipeline)
+    w.start()
+    try:
+        store.request_objects(job_id)
+        wait_until(lambda: store.get(job_id).objects_status.state == "done")
+    finally:
+        w.stop()
+    o = store.get(job_id).objects_status
+    assert o.state == "done" and o.count == 7 and o.progress == 1.0 and seen == [store.job_dir(job_id)]
+    assert store.get(job_id).state == "done"
+    assert "objects" in (store.job_dir(job_id) / "log.txt").read_text(encoding="utf-8")
+
+
+def test_worker_objects_failure_messages(store, tmp_path):
+    from recon3d.objects.pipeline import ModelDownloadFailed
+
+    job_id = _done_job(store, tmp_path)
+
+    def boom(job_dir, on_progress):
+        raise ModelDownloadFailed("hf down")
+
+    w = Worker(store, lambda d, m, p: None, objects_pipeline=boom)
+    w.start()
+    try:
+        store.request_objects(job_id)
+        wait_until(lambda: store.get(job_id).objects_status.state == "failed")
+    finally:
+        w.stop()
+    assert store.get(job_id).objects_status.message == "模型下载失败，请检查网络"
+    assert "hf down" in (store.job_dir(job_id) / "log.txt").read_text(encoding="utf-8")
+    assert store.get(job_id).state == "done"  # the scene is untouched by a failed recognition

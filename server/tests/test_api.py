@@ -48,7 +48,10 @@ def test_api_upload_status_download(client):
     jid = r.json()["job_id"]
     wait_until(lambda: client.get(f"/api/v1/jobs/{jid}").json()["state"] == "done")
     s = client.get(f"/api/v1/jobs/{jid}").json()
-    assert s == {"job_id": jid, "state": "done", "progress": 1.0, "message": s["message"], "mode": "fast"}
+    assert s == {
+        "job_id": jid, "state": "done", "progress": 1.0, "message": s["message"], "mode": "fast",
+        "objects": {"state": "none", "progress": 0.0, "message": "", "count": 0},
+    }
     r = client.get(f"/api/v1/jobs/{jid}/scene.splat")
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/octet-stream"
@@ -489,3 +492,58 @@ def test_rerun_while_source_training_queues(client_slow):
 
 def test_status_page_has_mode_column(client):
     assert "模式" in client.get("/").text
+
+
+# --- objects work (phase 2) ---
+
+
+def _done_job_via_client(client):
+    job_id = client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    wait_until(lambda: client.get(f"/api/v1/jobs/{job_id}").json()["state"] == "done")
+    return job_id
+
+
+def test_objects_endpoints(tmp_path):
+    store = JobStore(tmp_path / "data")
+    release = threading.Event()
+    app = create_app(store, Worker(store, _fast, objects_pipeline=lambda d, p: release.wait() or 0), PROFILES["laptop"])
+    with TestClient(app) as client:
+        job_id = _done_job_via_client(client)
+        r = client.get(f"/api/v1/jobs/{job_id}")
+        assert r.json()["objects"] == {"state": "none", "progress": 0.0, "message": "", "count": 0}
+        assert client.get(f"/api/v1/jobs/{job_id}/objects.zip").status_code == 404
+        r = client.post(f"/api/v1/jobs/{job_id}/objects")
+        assert r.status_code == 202 and r.json()["objects"]["state"] == "queued"
+        wait_until(lambda: client.get(f"/api/v1/jobs/{job_id}").json()["objects"]["state"] == "running")
+        assert client.post(f"/api/v1/jobs/{job_id}/objects").status_code == 409  # 正在识别
+        assert client.delete(f"/api/v1/jobs/{job_id}").status_code == 409  # running: refused like training
+        assert client.post("/api/v1/jobs/000000000000/objects").status_code == 404
+        rows = client.get("/api/v1/jobs").json()["jobs"]
+        assert any(j["job_id"] == job_id and j["objects"]["state"] == "running" for j in rows)
+        release.set()
+        wait_until(lambda: client.get(f"/api/v1/jobs/{job_id}").json()["objects"]["state"] == "done")
+
+
+def test_objects_zip_served_when_done(tmp_path):
+    store = JobStore(tmp_path / "data")
+    app = create_app(store, Worker(store, _fast, objects_pipeline=lambda d, p: 3), PROFILES["laptop"])
+    with TestClient(app) as client:
+        job_id = _done_job_via_client(client)
+        (store.job_dir(job_id) / "objects.zip").write_bytes(b"PK" + bytes(18))
+        client.post(f"/api/v1/jobs/{job_id}/objects")
+        wait_until(lambda: client.get(f"/api/v1/jobs/{job_id}").json()["objects"]["state"] == "done")
+        assert client.get(f"/api/v1/jobs/{job_id}").json()["objects"]["count"] == 3
+        r = client.get(f"/api/v1/jobs/{job_id}/objects.zip")
+        assert r.status_code == 200 and r.headers["content-type"] == "application/zip"
+
+
+def test_objects_request_on_unfinished_job_is_409(client_slow):
+    job_id = client_slow.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    r = client_slow.post(f"/api/v1/jobs/{job_id}/objects")
+    assert r.status_code == 409 and r.json()["detail"] == "任务尚未完成"
+
+
+def test_status_page_has_objects_column():
+    from recon3d.api.status_page import HTML
+
+    assert "<th>物体</th>" in HTML and "objects.zip" in HTML

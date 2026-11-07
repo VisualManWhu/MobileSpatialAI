@@ -19,6 +19,7 @@ HTML = """<!doctype html>
   .done .bar i { background: #3cb371; }
   .failed .bar i { background: #e33; }
   .failed td.msg { color: #c00; }
+  .objfail { color: #c00; }
   code { font-size: 13px; }
   #empty { color: #666; padding: 16px 0; }
 </style>
@@ -27,7 +28,7 @@ HTML = """<!doctype html>
 <h1>Recon3D 任务</h1>
 <div id="meta">加载中…</div>
 <table id="jobs" hidden>
-  <thead><tr><th>任务 ID</th><th>状态</th><th>模式</th><th>进度</th><th>说明</th><th>创建时间</th><th>拍摄包</th><th>结果</th></tr></thead>
+  <thead><tr><th>任务 ID</th><th>状态</th><th>模式</th><th>进度</th><th>说明</th><th>创建时间</th><th>拍摄包</th><th>结果</th><th>物体</th></tr></thead>
   <tbody></tbody>
 </table>
 <div id="empty" hidden>还没有任务。手机上传拍摄包后会出现在这里。</div>
@@ -41,6 +42,14 @@ function fmtBytes(n) {
 function fmtTime(t) {
   const d = new Date(t * 1000);
   return d.toLocaleString("zh-CN", { hour12: false });
+}
+function objectsCell(j) {
+  const o = j.objects || { state: "none" };
+  if (o.state === "none") return "无";
+  if (o.state === "queued") return "排队";
+  if (o.state === "running") return `识别中 ${Math.round(o.progress * 100)}%`;
+  if (o.state === "done") return `<a href="/api/v1/jobs/${j.job_id}/objects.zip">${o.count} 个</a>`;
+  return `<span class="objfail">失败</span>`;
 }
 function esc(s) {
   return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -71,6 +80,7 @@ async function refresh() {
       <td>${fmtTime(j.created_at)}</td>
       <td>${fmtBytes(j.capture_bytes)}</td>
       <td>${result}</td>
+      <td>${objectsCell(j)}</td>
     </tr>`;
   });
   document.querySelector("#jobs tbody").innerHTML = rows.join("");
