@@ -125,7 +125,7 @@ class DeleteViewModelTest {
     @Test fun cloudDeleteWhileUploadingCancelsThenDeletesUploadId() = runTest {
         api.uploadDelayMs = 60_000
         val up = uploader()
-        up.start(room, cap); advanceTimeBy(500) // FakeApi reports onCreated("u1") before its delay
+        up.start(room, cap, "fast"); advanceTimeBy(500) // FakeApi reports onCreated("u1") before its delay
         assertTrue(up.isRunning(room, cap))
         assertEquals("u1", repo.capture(room, cap).uploadId)
         assertTrue(vm(up).deleteCapture(room, cap, DeleteMode.CLOUD).isSuccess)
@@ -230,7 +230,7 @@ class DeleteViewModelTest {
     @Test fun cloudDeleteFailureOnUploadingResumesUpload() = runTest {
         api.uploadDelayMs = 60_000
         val up = uploader()
-        up.start(room, cap); advanceTimeBy(500)
+        up.start(room, cap, "fast"); advanceTimeBy(500)
         repeat(6) { api.deleteResponses += ApiException(ApiClient.MSG_BUSY, code = 409) }
         assertTrue(vm(up).deleteCapture(room, cap, DeleteMode.CLOUD).isFailure)
         assertTrue(up.isRunning(room, cap))
@@ -244,7 +244,7 @@ class DeleteViewModelTest {
         api.createdLate = true
         api.uploadDelayMs = 60_000
         val up = uploader()
-        up.start(room, cap); advanceTimeBy(500)
+        up.start(room, cap, "fast"); advanceTimeBy(500)
         val rec = repo.capture(room, cap)
         assertEquals("uploading", rec.state); assertNull(rec.uploadId); assertNull(rec.jobId)
         assertEquals(listOf(DeleteMode.CLOUD), vm(up).captureOptions(rec))

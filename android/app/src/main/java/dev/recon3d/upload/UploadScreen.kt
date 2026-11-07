@@ -33,6 +33,8 @@ import dev.recon3d.net.ApiException
 import dev.recon3d.net.JobState
 import dev.recon3d.net.UploadListener
 import dev.recon3d.rooms.CaptureRecord
+import dev.recon3d.rooms.MODE_FAST
+import dev.recon3d.rooms.MODE_PRECISE
 import dev.recon3d.rooms.RoomRepository
 import android.util.Log
 import kotlinx.coroutines.CancellationException
@@ -65,6 +67,10 @@ internal fun reconnectingMessage(n: Int) = "$MSG_RECONNECTING_PREFIX ($n)"
 
 /** Server 404 detail for an unknown job (docs/api.md): the job is gone, so retry must re-upload. */
 private const val MSG_JOB_GONE = "任务不存在"
+/** Status-text suffix for precise-mode records. */
+const val MSG_PRECISE_SUFFIX = " · 高精"
+/** Server message prefix of the precise-mode pose stages (docs/api.md). */
+const val MSG_POSE_STAGE_PREFIX = "位姿优化"
 
 /** Record state after "仅删手机文件": files gone, the server still has the model (see DeleteViewModel). */
 const val STATE_REMOTE = "remote"
@@ -93,22 +99,57 @@ class UploadViewModel(
     fun isRunning(roomId: String, captureId: String): Boolean =
         synchronized(running) { running["$roomId/$captureId"]?.isActive == true }
 
-    /** Uploads the capture's zip and tracks the resulting job. No-op if it is already running. */
-    fun start(roomId: String, captureId: String) = launchOnce(roomId, captureId) {
+    /**
+     * Uploads the capture's zip in [mode] ([MODE_FAST] | [MODE_PRECISE]) and tracks the resulting job.
+     * The mode is written into the record first so a retry re-uploads with the same one. No-op if it
+     * is already running.
+     */
+    fun start(roomId: String, captureId: String, mode: String) = launchOnce(roomId, captureId) {
+        repo.editCapture(roomId, captureId) { it.copy(mode = mode) }
         val jobId = upload(roomId, captureId) ?: return@launchOnce
         track(roomId, captureId, jobId)
     }
 
     /**
      * After a failure: if the server job is still known (failure was while polling/downloading),
-     * resume polling it; otherwise (upload failed, or the job itself failed/vanished) re-upload.
+     * resume polling it; otherwise (upload failed, or the job itself failed/vanished) re-upload with
+     * the record's mode.
      */
     fun retry(roomId: String, captureId: String) {
+        val record = repo.capture(roomId, captureId)
+        if (record.jobId == null) {
+            start(roomId, captureId, record.mode)
+        } else {
+            launchOnce(roomId, captureId) { track(roomId, captureId, record.jobId) }
+        }
+    }
+
+    /**
+     * Re-reconstructs a finished (or failed-after-upload) capture on the server in [mode] via
+     * `POST /jobs/{id}/rerun`, then tracks the new job. The local `scene.splat` stays until the new one
+     * is downloaded over it; the capture is never re-uploaded. Needs a known server job, else fails
+     * with [MSG_JOB_GONE].
+     */
+    fun rerun(roomId: String, captureId: String, mode: String) {
         val jobId = repo.capture(roomId, captureId).jobId
         if (jobId == null) {
-            start(roomId, captureId)
-        } else {
-            launchOnce(roomId, captureId) { track(roomId, captureId, jobId) }
+            fail(roomId, captureId, MSG_JOB_GONE, jobGone = true)
+            return
+        }
+        launchOnce(roomId, captureId) {
+            val newId = try {
+                api.rerunJob(jobId, mode)
+            } catch (e: ApiException) {
+                fail(roomId, captureId, e.messageZh, jobGone = e.code == 404)
+                return@launchOnce
+            }
+            repo.editCapture(roomId, captureId) {
+                it.copy(
+                    mode = mode, jobId = newId, serverIds = it.serverIds.plusDistinct(newId),
+                    state = "queued", progress = 0f, message = null,
+                )
+            }
+            track(roomId, captureId, newId)
         }
     }
 
@@ -139,7 +180,7 @@ class UploadViewModel(
     fun resumeInterrupted() {
         for (room in repo.roomsNow()) for (rec in room.captures) {
             when {
-                rec.state == "uploading" && rec.uploadId != null -> start(room.id, rec.id)
+                rec.state == "uploading" && rec.uploadId != null -> start(room.id, rec.id, rec.mode)
                 rec.state == "uploading" -> repo.editCapture(room.id, rec.id) {
                     it.copy(state = "failed", message = MSG_UPLOAD_INTERRUPTED, jobId = null)
                 }
@@ -155,7 +196,7 @@ class UploadViewModel(
     fun resume(roomId: String, captureId: String) {
         val rec = repo.capture(roomId, captureId)
         when {
-            rec.state == "uploading" -> start(roomId, captureId)
+            rec.state == "uploading" -> start(roomId, captureId, rec.mode)
             rec.state in ACTIVE && rec.jobId != null -> retry(roomId, captureId)
         }
     }
@@ -329,20 +370,24 @@ fun captureStatusText(record: CaptureRecord): String {
         return "$base · $retrying"
     }
     val reconnecting = record.message?.takeIf { it.startsWith(MSG_RECONNECTING_PREFIX) }
-    if (reconnecting != null && record.state == "uploading") return "上传中 $pct% · $reconnecting"
+    if (reconnecting != null && record.state == "uploading") return "上传中 $pct%${modeSuffix(record)} · $reconnecting"
     return when (record.state) {
         "local" -> "本地"
-        "uploading" -> "上传中 $pct%"
-        "queued" -> "排队中"
-        "training" -> "训练中 $pct%"
+        "uploading" -> "上传中 $pct%" + modeSuffix(record)
+        "queued" -> "排队中" + modeSuffix(record)
+        // Precise mode reports its COLMAP stages as "位姿优化 (…)" while still `training`.
+        "training" -> (record.message?.takeIf { it.startsWith(MSG_POSE_STAGE_PREFIX) } ?: "训练中 $pct%") + modeSuffix(record)
         // While downloading the message is "正在下载模型…", possibly with a reconnect suffix.
-        "exporting" -> record.message?.takeIf { it.startsWith(MSG_DOWNLOADING) } ?: "导出中"
-        "done" -> "完成"
+        "exporting" -> record.message?.takeIf { it.startsWith(MSG_DOWNLOADING) } ?: ("导出中" + modeSuffix(record))
+        "done" -> "完成" + modeSuffix(record)
         STATE_REMOTE -> "仅云端"
         "failed" -> "失败：${record.message ?: "未知原因"}"
         else -> record.state
     }
 }
+
+/** ` · 高精` for precise-mode records, empty for fast ones. */
+private fun modeSuffix(record: CaptureRecord): String = if (record.mode == MODE_PRECISE) MSG_PRECISE_SUFFIX else ""
 
 /** "重试" resumes polling a known server job; "继续上传" resumes a known upload; "重新上传" sends the zip again. */
 fun retryButtonLabel(record: CaptureRecord): String = when {

@@ -22,6 +22,7 @@ import dev.recon3d.net.ApiException
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.DeleteDialog
 import dev.recon3d.rooms.DeleteMode
+import dev.recon3d.rooms.MODE_FAST
 import dev.recon3d.rooms.RoomListScreen
 import dev.recon3d.rooms.RoomScreen
 import dev.recon3d.rooms.captureDeleteBody
@@ -111,7 +112,7 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
                 repo = graph.rooms,
                 roomId = roomId,
                 onCapture = { nav.navigate(Routes.capture(roomId)) },
-                onUpload = { id -> withServer { graph.uploader.start(roomId, id) } },
+                onUpload = { id -> withServer { graph.uploader.start(roomId, id, MODE_FAST) } },
                 onRetry = { id -> withServer { graph.uploader.retry(roomId, id) } },
                 onView = { id -> nav.navigate(Routes.viewer(roomId, id)) },
                 onViewPoints = { id -> nav.navigate(Routes.points(roomId, id)) },
@@ -192,7 +193,7 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
                 record = record,
                 onUpload = {
                     if (!resumed()) return@PreviewScreen
-                    withServer { graph.uploader.start(roomId, captureId) }
+                    withServer { graph.uploader.start(roomId, captureId, MODE_FAST) }
                     nav.popBackStack() // room shows the upload progress
                 },
                 onRetake = {

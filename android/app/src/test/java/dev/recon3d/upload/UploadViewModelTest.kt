@@ -55,7 +55,7 @@ class UploadViewModelTest {
     @Test fun uploadFailureKeepsZipAndAllowsRetry() = runTest {
         val vm = vm()
         api.failUploadOnce(ApiException("连不上计算端，请检查 Wi-Fi 和地址"))
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         assertEquals("failed", repo.capture(room, cap).state)
         assertEquals("连不上计算端，请检查 Wi-Fi 和地址", repo.capture(room, cap).message)
         assertTrue(File(repo.capture(room, cap).zipPath).exists())
@@ -67,7 +67,7 @@ class UploadViewModelTest {
     @Test fun serverFailedJobShowsMessage() = runTest {
         val vm = vm()
         api.jobResult = JobStatus("j", JobState.FAILED, 0f, "显存不足，请降低分辨率或改用服务器")
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         assertEquals("failed", repo.capture(room, cap).state)
         assertEquals("显存不足，请降低分辨率或改用服务器", repo.capture(room, cap).message)
         assertTrue(File(repo.capture(room, cap).zipPath).exists())
@@ -76,7 +76,7 @@ class UploadViewModelTest {
     @Test fun serverFailedJobRetryReuploads() = runTest {
         val vm = vm()
         api.jobQueue.add(JobStatus("j", JobState.FAILED, 0f, "服务重启，任务中断，请重新上传"))
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         vm.retry(room, cap); advanceUntilIdle()
         assertEquals("done", repo.capture(room, cap).state)
         assertEquals(2, api.uploads)
@@ -85,7 +85,7 @@ class UploadViewModelTest {
     @Test fun retryResumesPollingWhenJobIdExists() = runTest {
         val vm = vm()
         api.failJobTimes(MAX_POLL_ERRORS, ApiException(ApiClient.MSG_UNREACHABLE))
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         val failed = repo.capture(room, cap)
         assertEquals("failed", failed.state)
         assertEquals("j", failed.jobId)
@@ -98,7 +98,7 @@ class UploadViewModelTest {
     @Test fun transientPollErrorsAreRetriedWithBackoff() = runTest {
         val vm = vm()
         api.jobQueue.add(JobStatus("j", JobState.TRAINING, 0.3f, "训练中"))
-        vm.start(room, cap); runCurrent()
+        vm.start(room, cap, "fast"); runCurrent()
         assertEquals("training", repo.capture(room, cap).state)
         api.failJobTimes(5, ApiException(ApiClient.MSG_UNREACHABLE))
         advanceTimeBy(3.seconds); runCurrent() // poll 2 fails -> keep last state, back off 3 s
@@ -123,7 +123,7 @@ class UploadViewModelTest {
     @Test fun tenConsecutivePollErrorsFailTheCapture() = runTest {
         val vm = vm()
         api.failJobTimes(MAX_POLL_ERRORS, ApiException(ApiClient.MSG_UNREACHABLE))
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
         assertEquals("failed", rec.state)
         assertEquals(ApiClient.MSG_UNREACHABLE, rec.message)
@@ -135,14 +135,14 @@ class UploadViewModelTest {
     @Test fun nineErrorsThenSuccessStillCompletes() = runTest {
         val vm = vm()
         api.failJobTimes(MAX_POLL_ERRORS - 1, ApiException(ApiClient.MSG_UNREACHABLE))
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         assertEquals("done", repo.capture(room, cap).state)
     }
 
     @Test fun unexpectedExceptionShowsFixedChineseMessage() = runTest {
         val vm = vm()
         api.jobThrow = IllegalStateException("internal detail")
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
         assertEquals("failed", rec.state)
         assertEquals(MSG_UNEXPECTED, rec.message)
@@ -157,7 +157,7 @@ class UploadViewModelTest {
 
     @Test fun doneDownloadsSceneAndSetsScenePath() = runTest {
         val vm = vm()
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
         val expected = File(scenesDir, "$room/$cap/scene.splat")
         assertEquals("done", rec.state)
@@ -169,7 +169,7 @@ class UploadViewModelTest {
         val vm = vm()
         api.jobQueue.add(JobStatus("j", JobState.QUEUED, 0f, "排队中"))
         api.jobQueue.add(JobStatus("j", JobState.TRAINING, 0.42f, "训练中"))
-        vm.start(room, cap); runCurrent()
+        vm.start(room, cap, "fast"); runCurrent()
         assertEquals("queued", repo.capture(room, cap).state)
         assertEquals(1, api.polls)
 
@@ -187,7 +187,7 @@ class UploadViewModelTest {
     @Test fun unknownJobOnPollForcesReuploadOnRetry() = runTest {
         val vm = vm()
         api.failJobOnce(ApiException("任务不存在"))
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
         assertEquals("failed", rec.state)
         assertNull(rec.jobId)
@@ -199,7 +199,7 @@ class UploadViewModelTest {
     @Test fun missingZipFailsWithChineseMessage() = runTest {
         val vm = vm()
         File(repo.capture(room, cap).zipPath).delete()
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         assertEquals("failed", repo.capture(room, cap).state)
         assertEquals(MSG_ZIP_MISSING, repo.capture(room, cap).message)
         assertEquals(0, api.uploads)
@@ -220,19 +220,19 @@ class UploadViewModelTest {
         val vm = vm()
         api.failUploadOnce(ApiException("连不上计算端，请检查 Wi-Fi 和地址"))
         repo.throwOnFailedWrite = true
-        vm.start(room, cap); advanceUntilIdle() // runTest would rethrow an escaped exception
+        vm.start(room, cap, "fast"); advanceUntilIdle() // runTest would rethrow an escaped exception
         assertEquals(1, logged.size)
         assertTrue(logged.single() is IOException)
         assertFalse(vm.isRunning(room, cap))
         // The coroutine finished, so the capture can be started again.
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         assertEquals("done", repo.capture(room, cap).state)
     }
 
     @Test fun downloadFailureKeepsJobIdAndRetryResumesWithoutReupload() = runTest {
         val vm = vm()
         api.failDownloadOnce(ApiException("连不上计算端，请检查 Wi-Fi 和地址"))
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         val failed = repo.capture(room, cap)
         assertEquals("failed", failed.state)
         assertNull(failed.scenePath)
@@ -250,9 +250,9 @@ class UploadViewModelTest {
     @Test fun concurrentStartsUploadOnce() = runTest {
         val vm = vm()
         api.uploadDelayMs = 1_000
-        vm.start(room, cap); runCurrent() // first upload now suspended mid-transfer
+        vm.start(room, cap, "fast"); runCurrent() // first upload now suspended mid-transfer
         assertTrue(vm.isRunning(room, cap))
-        vm.start(room, cap)
+        vm.start(room, cap, "fast")
         vm.retry(room, cap)
         advanceUntilIdle()
         assertEquals(1, api.uploads)
@@ -262,7 +262,7 @@ class UploadViewModelTest {
     @Test fun uploadProgressPersistedOnlyOnWholePercentChange() = runTest {
         val vm = vm()
         api.progressSteps = (1..1000).map { it / 1000f } // 1000 callbacks, 100 distinct percents
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         // 1 write entering "uploading", 1 for the upload id, then one per percent 0..100.
         assertEquals(103, repo.uploadingWrites)
         assertEquals("done", repo.capture(room, cap).state)
@@ -273,7 +273,7 @@ class UploadViewModelTest {
     @Test fun uploadIdIsPersistedThenClearedOnJobCreation() = runTest {
         val vm = vm()
         api.progressSteps = listOf(0.3f); api.uploadDelayMs = 100
-        vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        vm.start(room, cap, "fast"); advanceTimeBy(50); runCurrent()
         assertEquals("u1", repo.capture(room, cap).uploadId)
         advanceUntilIdle()
         val rec = repo.capture(room, cap)
@@ -298,7 +298,7 @@ class UploadViewModelTest {
     @Test fun reconnectMessageShownDuringUploadAndClearedByProgress() = runTest {
         api.retrySteps = listOf(1, 2); api.uploadDelayMs = 100; api.progressSteps = listOf(0.37f)
         val vm = vm()
-        vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        vm.start(room, cap, "fast"); advanceTimeBy(50); runCurrent()
         val rec = repo.capture(room, cap)
         assertEquals("uploading", rec.state)
         assertEquals(reconnectingMessage(2), rec.message)
@@ -310,7 +310,7 @@ class UploadViewModelTest {
 
     @Test fun checksumFailureClearsUploadIdAndOffersReupload() = runTest {
         api.failUploadOnce(ApiException("文件校验失败，请重新上传", code = 422))
-        val vm = vm(); vm.start(room, cap); advanceUntilIdle()
+        val vm = vm(); vm.start(room, cap, "fast"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
         assertEquals("failed", rec.state); assertEquals("文件校验失败，请重新上传", rec.message)
         assertNull(rec.uploadId); assertEquals("重新上传", retryButtonLabel(rec))
@@ -318,7 +318,7 @@ class UploadViewModelTest {
 
     @Test fun transportFailureKeepsUploadIdAndOffersContinue() = runTest {
         api.failUploadOnce(ApiException(ApiClient.MSG_UNREACHABLE))  // FakeApi calls onCreated first
-        val vm = vm(); vm.start(room, cap); advanceUntilIdle()
+        val vm = vm(); vm.start(room, cap, "fast"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
         assertEquals("failed", rec.state); assertEquals("u1", rec.uploadId)
         assertEquals("继续上传", retryButtonLabel(rec))
@@ -329,7 +329,7 @@ class UploadViewModelTest {
     @Test fun downloadReconnectShowsMessageWithDownloading() = runTest {
         api.downloadRetrySteps = listOf(2)
         api.failDownloadOnce(ApiException(ApiClient.MSG_UNREACHABLE))
-        val vm = vm(); vm.start(room, cap); advanceUntilIdle()
+        val vm = vm(); vm.start(room, cap, "fast"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
         assertEquals("failed", rec.state)
         val during = rec.copy(state = "exporting", message = "$MSG_DOWNLOADING · ${reconnectingMessage(2)}")
@@ -338,7 +338,7 @@ class UploadViewModelTest {
 
     @Test fun staleScenePartIsDroppedBeforeANewUpload() = runTest {  // review finding I1
         val part = File(scenesDir, "$room/$cap/scene.splat.part").apply { parentFile!!.mkdirs(); writeBytes(byteArrayOf(7)) }
-        vm().start(room, cap); advanceUntilIdle()
+        vm().start(room, cap, "fast"); advanceUntilIdle()
         assertEquals(false, api.partExistedAtDownload)
         assertFalse(part.exists())
         assertEquals("done", repo.capture(room, cap).state)
@@ -346,7 +346,7 @@ class UploadViewModelTest {
 
     @Test fun downloadReconnectMessageClearsWhenTransferResumes() = runTest {  // review finding I2
         api.downloadRetrySteps = listOf(2); api.downloadDelayMs = 100
-        val vm = vm(); vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        val vm = vm(); vm.start(room, cap, "fast"); advanceTimeBy(50); runCurrent()
         assertEquals("正在下载模型… · 网络中断，正在重连 (2)", captureStatusText(repo.capture(room, cap)))
         api.downloadRetrySteps = emptyList()
         advanceUntilIdle()
@@ -355,7 +355,7 @@ class UploadViewModelTest {
 
     @Test fun downloadReconnectZeroRestoresDownloadingText() = runTest {
         api.downloadRetrySteps = listOf(1, 0); api.downloadDelayMs = 100
-        val vm = vm(); vm.start(room, cap); advanceTimeBy(50); runCurrent()
+        val vm = vm(); vm.start(room, cap, "fast"); advanceTimeBy(50); runCurrent()
         assertEquals("正在下载模型…", captureStatusText(repo.capture(room, cap)))
         advanceUntilIdle()
     }
@@ -385,7 +385,7 @@ class UploadViewModelTest {
     @Test fun cancelStopsUploadAndJoins() = runTest {
         val vm = vm()
         api.uploadDelayMs = 10_000
-        vm.start(room, cap)
+        vm.start(room, cap, "fast")
         advanceTimeBy(1_000)
         assertTrue(vm.isRunning(room, cap))
         vm.cancel(room, cap)
@@ -431,12 +431,90 @@ class UploadViewModelTest {
     @Test fun serverIdsAccumulateAcrossFailureAndReupload() = runTest {
         val vm = vm()
         api.jobQueue += JobStatus("j", JobState.FAILED, 0f, "重建失败")
-        vm.start(room, cap); advanceUntilIdle()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
         val failed = repo.capture(room, cap)
         assertEquals("failed", failed.state); assertNull(failed.jobId)
         assertEquals(listOf("u1", "j"), failed.serverIds)
         vm.retry(room, cap); advanceUntilIdle()
         assertEquals("done", repo.capture(room, cap).state)
         assertEquals(listOf("u1", "j"), repo.capture(room, cap).serverIds) // same ids again: no duplicates
+    }
+
+    // --- mode / rerun ---
+
+    @Test fun startRecordsModeAndPassesItToApi() = runTest {
+        vm().start(room, cap, "precise"); advanceUntilIdle()
+        assertEquals("precise", api.lastMode)
+        assertEquals("precise", repo.capture(room, cap).mode)
+    }
+
+    @Test fun retryReuploadsWithRecordedMode() = runTest {
+        val vm = vm()
+        api.failUploadOnce(ApiException("boom"))
+        vm.start(room, cap, "precise"); advanceUntilIdle()
+        assertEquals("failed", repo.capture(room, cap).state)
+        vm.retry(room, cap); advanceUntilIdle()
+        assertEquals(listOf("precise", "precise"), api.modes)
+    }
+
+    @Test fun rerunSwapsJobKeepsSceneUntilDownloaded() = runTest {
+        val vm = vm()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
+        val oldScene = repo.capture(room, cap).scenePath!!
+        api.rerunResult = "j2"
+        api.jobQueue += JobStatus("j2", JobState.TRAINING, 0.1f, "位姿优化 (特征提取)")
+        vm.rerun(room, cap, "precise"); runCurrent()
+        val mid = repo.capture(room, cap)
+        assertEquals(listOf("j" to "precise"), api.rerunCalls)
+        assertEquals("j2", mid.jobId); assertEquals("precise", mid.mode)
+        assertEquals(listOf("u1", "j", "j2"), mid.serverIds)
+        assertEquals(oldScene, mid.scenePath)
+        assertEquals("位姿优化 (特征提取) · 高精", captureStatusText(mid))  // first poll already applied
+        advanceUntilIdle()
+        val done = repo.capture(room, cap)
+        assertEquals("done", done.state); assertEquals(oldScene, done.scenePath)
+        assertEquals("完成 · 高精", captureStatusText(done))
+    }
+
+    @Test fun rerunFailureKeepsOldScenePath() = runTest {
+        val vm = vm()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
+        val oldScene = repo.capture(room, cap).scenePath!!
+        api.rerunFailure = ApiException("上传未完成", code = 409)
+        vm.rerun(room, cap, "precise"); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state); assertEquals("上传未完成", rec.message)
+        assertEquals(oldScene, rec.scenePath); assertEquals("j", rec.jobId)  // 409 is not "job gone"
+    }
+
+    @Test fun rerunJobGone404DropsJobId() = runTest {
+        val vm = vm()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
+        api.rerunFailure = ApiException("任务不存在", code = 404)
+        vm.rerun(room, cap, "precise"); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("failed", rec.state); assertNull(rec.jobId)
+    }
+
+    @Test fun rerunWithoutJobIdFails() = runTest {
+        vm().rerun(room, cap, "precise"); advanceUntilIdle()
+        assertEquals("failed", repo.capture(room, cap).state)
+        assertTrue(api.rerunCalls.isEmpty())
+    }
+
+    @Test fun statusTextPreciseSuffixAndPoseStage() {
+        val r = CaptureRecord(id = "c", zipPath = "z", mode = "precise")
+        assertEquals("本地", captureStatusText(r))
+        assertEquals("上传中 42% · 高精", captureStatusText(r.copy(state = "uploading", progress = 0.42f)))
+        assertEquals("排队中 · 高精", captureStatusText(r.copy(state = "queued")))
+        assertEquals("训练中 50% · 高精", captureStatusText(r.copy(state = "training", progress = 0.5f)))
+        assertEquals("位姿优化 (特征匹配) · 高精", captureStatusText(r.copy(state = "training", progress = 0.2f, message = "位姿优化 (特征匹配)")))
+        assertEquals("导出中 · 高精", captureStatusText(r.copy(state = "exporting")))
+        assertEquals("完成 · 高精", captureStatusText(r.copy(state = "done")))
+        assertEquals("失败：x", captureStatusText(r.copy(state = "failed", message = "x")))
+        assertEquals("仅云端", captureStatusText(r.copy(state = "remote")))
+        assertEquals("训练中 50%", captureStatusText(r.copy(mode = "fast", state = "training", progress = 0.5f)))
+        assertEquals("训练中 30% · 高精 · 网络暂时不可用，正在重试 (1/10)",
+            captureStatusText(r.copy(state = "training", progress = 0.3f, message = retryingMessage(1))))
     }
 }
