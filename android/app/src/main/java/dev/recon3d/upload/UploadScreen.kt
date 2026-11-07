@@ -111,7 +111,7 @@ class UploadViewModel(
      * is already running.
      */
     fun start(roomId: String, captureId: String, mode: String) = launchOnce(roomId, captureId) {
-        repo.editCapture(roomId, captureId) { it.copy(mode = mode) }
+        repo.editCapture(roomId, captureId) { it.copy(mode = mode).withoutObjects() }
         val jobId = upload(roomId, captureId) ?: return@launchOnce
         track(roomId, captureId, jobId)
     }
@@ -156,7 +156,7 @@ class UploadViewModel(
                 it.copy(
                     mode = mode, jobId = newId, serverIds = it.serverIds.plusDistinct(newId),
                     state = "queued", progress = 0f, message = null,
-                )
+                ).withoutObjects()
             }
             track(roomId, captureId, newId)
         }
@@ -381,6 +381,10 @@ class UploadViewModel(
 }
 
 private fun List<String>.plusDistinct(id: String): List<String> = if (id in this) this else this + id
+
+/** A new server job has no object table: drop the fields (the old files go with the capture dir). */
+private fun CaptureRecord.withoutObjects(): CaptureRecord =
+    copy(objectsState = "none", objectsProgress = 0f, objectsMessage = null, objectsCount = 0, objectsPath = null)
 
 /** Chinese status line for a capture row, e.g. `训练中 42%` or `失败：<原因>`. */
 fun captureStatusText(record: CaptureRecord): String {

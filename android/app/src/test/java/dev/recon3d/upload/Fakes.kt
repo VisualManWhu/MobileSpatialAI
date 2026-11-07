@@ -5,6 +5,7 @@ import dev.recon3d.net.ApiException
 import dev.recon3d.net.Health
 import dev.recon3d.net.JobState
 import dev.recon3d.net.JobStatus
+import dev.recon3d.net.ObjectsStatus
 import dev.recon3d.net.UploadListener
 import dev.recon3d.rooms.CaptureRecord
 import dev.recon3d.rooms.RoomRepository
@@ -82,8 +83,13 @@ internal class FakeApi : Api {
         polls++
         jobThrow?.let { jobThrow = null; throw it }
         jobFailure?.let { if (--jobFailuresLeft <= 0) jobFailure = null; throw it }
-        return jobQueue.removeFirstOrNull() ?: jobResult
+        val status = jobQueue.removeFirstOrNull() ?: jobResult
+        // Objects polling reads the objects block: the next scripted one, else the last one seen.
+        objectsStatuses.removeFirstOrNull()?.let { lastObjects = it }
+        return status.copy(objects = lastObjects)
     }
+
+    private var lastObjects = ObjectsStatus()
 
     /** Virtual-time delay inside downloadScene after the retry steps, to observe the record mid-download. */
     var downloadDelayMs = 0L
@@ -98,6 +104,27 @@ internal class FakeApi : Api {
     override suspend fun deleteJob(jobId: String) {
         deletedJobs += jobId
         deleteResponses.removeFirstOrNull()?.let { throw it }
+    }
+
+    /** Job ids passed to requestObjects, in order. */
+    val requestObjectsCalls = mutableListOf<String>()
+    /** Thrown once by the next requestObjects call when set. */
+    var requestObjectsFailure: ApiException? = null
+    /** Objects blocks returned by successive job() polls (then [jobResult]'s objects, default none). */
+    val objectsStatuses = ArrayDeque<ObjectsStatus>()
+    /** Bytes downloadObjects writes; null = throw 404. */
+    var objectsZip: ByteArray? = null
+
+    override suspend fun requestObjects(jobId: String): ObjectsStatus {
+        requestObjectsCalls += jobId
+        requestObjectsFailure?.let { requestObjectsFailure = null; throw it }
+        return ObjectsStatus("queued", 0f, "排队中", 0)
+    }
+
+    override suspend fun downloadObjects(jobId: String, dest: File, onRetry: (Int) -> Unit) {
+        val bytes = objectsZip ?: throw ApiException("没有物体表", code = 404)
+        dest.parentFile?.mkdirs()
+        dest.writeBytes(bytes)
     }
 
     override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) {

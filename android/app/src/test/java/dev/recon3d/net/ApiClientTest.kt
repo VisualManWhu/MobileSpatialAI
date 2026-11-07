@@ -406,4 +406,41 @@ class ApiClientTest {
         server.enqueue(MockResponse().setResponseCode(409).setBody("""{"detail":"上传未完成"}"""))
         assertEquals(409, apiError { client.rerunJob("aaaaaaaaaaaa", "fast") }.code)
     }
+
+    // --- objects (phase 2) ---
+
+    @Test fun requestObjectsPostsAndDecodesTheObjectsBlock() = runTest {
+        server.enqueue(MockResponse().setResponseCode(202).setBody("""{"job_id":"aaaaaaaaaaaa","objects":{"state":"queued","progress":0.0,"message":"排队中","count":0}}"""))
+        val o = client.requestObjects("aaaaaaaaaaaa")
+        assertEquals("queued", o.state)
+        val req = server.takeRequest()
+        assertEquals("POST", req.method); assertEquals("/api/v1/jobs/aaaaaaaaaaaa/objects", req.path)
+    }
+
+    @Test fun requestObjectsErrorsCarryServerDetail() {
+        server.enqueue(MockResponse().setResponseCode(409).setBody("""{"detail":"正在识别"}"""))
+        val e = apiError { client.requestObjects("aaaaaaaaaaaa") }
+        assertEquals("正在识别", e.messageZh); assertEquals(409, e.code)
+    }
+
+    @Test fun jobStatusWithoutObjectsBlockDecodesToNone() = runTest {
+        server.enqueue(MockResponse().setBody("""{"job_id":"j","state":"done","progress":1.0,"message":"完成","mode":"fast"}"""))
+        assertEquals(ObjectsStatus(), client.job("j").objects)
+        server.enqueue(MockResponse().setBody("""{"job_id":"j","state":"done","progress":1.0,"message":"完成","objects":{"state":"running","progress":0.4,"message":"识别物体 (检测)","count":0}}"""))
+        assertEquals(ObjectsStatus("running", 0.4f, "识别物体 (检测)", 0), client.job("j").objects)
+    }
+
+    @Test fun downloadObjectsWritesTheZip() = runTest {
+        server.enqueue(MockResponse().setBody(Buffer().write(byteArrayOf(80, 75, 5, 6))))
+        val dest = File(tmp.root, "x/objects.zip")
+        client.downloadObjects("aaaaaaaaaaaa", dest)
+        assertArrayEquals(byteArrayOf(80, 75, 5, 6), dest.readBytes())
+        assertEquals("/api/v1/jobs/aaaaaaaaaaaa/objects.zip", server.takeRequest().path)
+    }
+
+    @Test fun downloadObjectsNotFoundSurfacesDetail() {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("""{"detail":"没有物体表"}"""))
+        val e = apiError { client.downloadObjects("aaaaaaaaaaaa", File(tmp.root, "objects.zip")) }
+        assertEquals("没有物体表", e.messageZh); assertEquals(404, e.code)
+    }
 }

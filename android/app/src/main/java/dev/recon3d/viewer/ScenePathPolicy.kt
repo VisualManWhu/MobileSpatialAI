@@ -12,12 +12,21 @@ import java.io.File
  */
 object ScenePathPolicy {
     const val SCENE_NAME = "scene.splat"
+    /** Per-splat object ids (phase 2), served from the capture's objects directory. */
+    const val OBJECTS_NAME = "objects.bin"
 
-    fun allows(requestPath: String): Boolean = requestPath == SCENE_NAME
+    fun allows(requestPath: String): Boolean = requestPath == SCENE_NAME || requestPath == OBJECTS_NAME
 
-    /** The file to serve for [requestPath], or null (→ 404) if not allowed or not on disk. */
-    fun resolve(requestPath: String, scenePath: String?): File? {
-        if (!allows(requestPath) || scenePath == null) return null
-        return File(scenePath).takeIf { it.isFile }
+    /**
+     * The file to serve for [requestPath], or null (→ 404) if not allowed or not on disk:
+     * [scenePath] itself for [SCENE_NAME], `<objectsPath>/objects.bin` for [OBJECTS_NAME].
+     */
+    fun resolve(requestPath: String, scenePath: String?, objectsPath: String? = null): File? {
+        val file = when (requestPath) {
+            SCENE_NAME -> scenePath?.let { File(it) }
+            OBJECTS_NAME -> objectsPath?.let { File(it, OBJECTS_NAME) }
+            else -> null
+        }
+        return file?.takeIf { it.isFile }
     }
 }

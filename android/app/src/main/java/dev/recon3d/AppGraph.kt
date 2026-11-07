@@ -6,11 +6,13 @@ import dev.recon3d.net.ApiClient
 import dev.recon3d.net.ApiException
 import dev.recon3d.net.Health
 import dev.recon3d.net.JobStatus
+import dev.recon3d.net.ObjectsStatus
 import dev.recon3d.net.UploadListener
 import dev.recon3d.rooms.DeleteViewModel
 import dev.recon3d.rooms.RoomRepository
 import dev.recon3d.settings.ServerSettings
 import dev.recon3d.upload.UploadViewModel
+import dev.recon3d.viewer.ObjectsViewModel
 import kotlinx.coroutines.flow.first
 import java.io.File
 
@@ -30,6 +32,11 @@ class AppGraph private constructor(context: Context) {
         repo = rooms,
         scenesDir = File(app.filesDir, "rooms"),
     ).also { it.resumeInterrupted() }
+    val objects = ObjectsViewModel(
+        api = SettingsBackedApi(settings),
+        repo = rooms,
+        scenesDir = File(app.filesDir, "rooms"),
+    )
     val deleter = DeleteViewModel(
         api = SettingsBackedApi(settings),
         repo = rooms,
@@ -61,4 +68,7 @@ private class SettingsBackedApi(private val settings: ServerSettings) : Api {
     override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) =
         client().downloadScene(id, dest, onRetry)
     override suspend fun deleteJob(jobId: String) = client().deleteJob(jobId)
+    override suspend fun requestObjects(jobId: String): ObjectsStatus = client().requestObjects(jobId)
+    override suspend fun downloadObjects(jobId: String, dest: File, onRetry: (Int) -> Unit) =
+        client().downloadObjects(jobId, dest, onRetry)
 }

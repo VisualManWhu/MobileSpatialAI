@@ -78,6 +78,15 @@ interface Api {
      * (already gone); a 409 surfaces as [ApiException] with the server's detail and `code = 409`.
      */
     suspend fun deleteJob(jobId: String)
+
+    /**
+     * `POST /jobs/{id}/objects`: queues object recognition over the done job [jobId] and returns the
+     * new objects block. 404 / 409 surface as [ApiException] with the server detail and code.
+     */
+    suspend fun requestObjects(jobId: String): ObjectsStatus
+
+    /** Downloads `objects.zip` to [dest] (same resumable transfer as [downloadScene]); 404 = no table yet. */
+    suspend fun downloadObjects(jobId: String, dest: File, onRetry: (Int) -> Unit = {})
 }
 
 /**
@@ -226,14 +235,26 @@ class ApiClient(
         }
     }
 
-    override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) {
+    override suspend fun requestObjects(jobId: String): ObjectsStatus {
+        val request = Request.Builder().url(url("jobs", jobId, "objects")).post(ByteArray(0).toRequestBody(null)).build()
+        return call(request) { decode<ObjectsRequested>(it.body!!.string()).objects }
+    }
+
+    override suspend fun downloadObjects(jobId: String, dest: File, onRetry: (Int) -> Unit) =
+        downloadFile(listOf("jobs", jobId, "objects.zip"), dest, onRetry)
+
+    override suspend fun downloadScene(id: String, dest: File, onRetry: (Int) -> Unit) =
+        downloadFile(listOf("jobs", id, "scene.splat"), dest, onRetry)
+
+    /** Resumable GET of one server file into [dest] via `dest.part` + `Range`; see [Api.downloadScene]. */
+    private suspend fun downloadFile(segments: List<String>, dest: File, onRetry: (Int) -> Unit) {
         dest.absoluteFile.parentFile?.mkdirs()
         val part = File(dest.path + ".part")
         var attempt = 0
         var allowRangeRetry = true
         while (true) {
             val have = if (part.isFile) part.length() else 0L
-            val builder = Request.Builder().url(url("jobs", id, "scene.splat")).get()
+            val builder = Request.Builder().url(url(*segments.toTypedArray())).get()
             if (have > 0) builder.header("Range", "bytes=$have-")
             try {
                 call(builder.build()) { response ->

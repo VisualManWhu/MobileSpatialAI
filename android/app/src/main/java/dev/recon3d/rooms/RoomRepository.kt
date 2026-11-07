@@ -61,6 +61,14 @@ data class CaptureRecord(
     val pointCount: Int = 0,
     /** Viewer start camera (trajectory centre), computed from the zip on first view; null until then. */
     val home: HomeView? = null,
+    /** Object recognition (phase 2): `none` | `queued` | `running` | `done` | `failed`. */
+    val objectsState: String = "none",
+    val objectsProgress: Float = 0f,
+    /** Stage text while running; the reason when failed. */
+    val objectsMessage: String? = null,
+    val objectsCount: Int = 0,
+    /** Directory holding the unpacked `objects.json` / `objects.bin` / `thumbs/`; kept across a failed re-run. */
+    val objectsPath: String? = null,
 )
 
 /**

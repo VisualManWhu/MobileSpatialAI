@@ -21,7 +21,22 @@ data class JobStatus(
     val progress: Float,
     /** Chinese status text; on failure, the reason. */
     val message: String,
+    /** Phase-2 object recognition attached to this job; servers before phase 2 omit it. */
+    val objects: ObjectsStatus = ObjectsStatus(),
 )
+
+/** The `objects` block of a job (docs/api.md): `none` | `queued` | `running` | `done` | `failed`. */
+@Serializable
+data class ObjectsStatus(
+    val state: String = "none",
+    val progress: Float = 0f,
+    val message: String = "",
+    val count: Int = 0,
+)
+
+/** `POST /api/v1/jobs/{id}/objects` 202 body. */
+@Serializable
+internal data class ObjectsRequested(@SerialName("job_id") val jobId: String, val objects: ObjectsStatus)
 
 @Serializable
 enum class JobState {

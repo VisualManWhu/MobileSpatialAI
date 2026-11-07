@@ -41,4 +41,16 @@ class ScenePathPolicyTest {
         val stored = tmp.newFile("cap-1.splat").apply { writeBytes(ByteArray(64)) }
         assertEquals(stored, ScenePathPolicy.resolve("scene.splat", stored.path))
     }
+
+    @Test fun `objects_bin is served from the objects directory only when present`() {
+        val scene = tmp.newFile("scene.splat").apply { writeBytes(ByteArray(32)) }
+        val objects = tmp.newFolder("objects").apply { resolve("objects.bin").writeBytes(ByteArray(4)) }
+        assertTrue(ScenePathPolicy.allows("objects.bin"))
+        assertEquals(objects.resolve("objects.bin"), ScenePathPolicy.resolve("objects.bin", scene.path, objects.path))
+        assertNull(ScenePathPolicy.resolve("objects.bin", scene.path, null))
+        assertNull(ScenePathPolicy.resolve("objects.bin", scene.path, tmp.root.resolve("missing").path))
+        assertNull(ScenePathPolicy.resolve("../objects.bin", scene.path, objects.path))
+        assertNull(ScenePathPolicy.resolve("objects.json", scene.path, objects.path))
+        assertEquals(scene, ScenePathPolicy.resolve("scene.splat", scene.path, objects.path))
+    }
 }

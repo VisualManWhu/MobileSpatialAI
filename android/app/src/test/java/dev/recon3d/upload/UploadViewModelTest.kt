@@ -578,4 +578,17 @@ class UploadViewModelTest {
         assertNull(rerunMenuLabel(r.copy(state = "remote")))
         assertNull(rerunMenuLabel(r.copy(state = "failed")))
     }
+
+    @Test fun rerunAndStartResetObjectsFields() = runTest {
+        val vm = vm()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
+        repo.editCapture(room, cap) { it.copy(objectsState = "done", objectsCount = 3, objectsPath = "/x/objects", objectsMessage = "完成") }
+        vm.rerun(room, cap, "precise"); runCurrent()
+        val r = repo.capture(room, cap)
+        assertEquals("none", r.objectsState); assertEquals(0, r.objectsCount); assertNull(r.objectsPath); assertNull(r.objectsMessage)
+        advanceUntilIdle()
+        repo.editCapture(room, cap) { it.copy(objectsState = "done", objectsCount = 3, objectsPath = "/x/objects", state = "failed", jobId = null) }
+        vm.start(room, cap, "fast"); runCurrent()
+        assertEquals("none", repo.capture(room, cap).objectsState)
+    }
 }
