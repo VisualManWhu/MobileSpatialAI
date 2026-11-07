@@ -69,6 +69,12 @@ internal fun reconnectingMessage(n: Int) = "$MSG_RECONNECTING_PREFIX ($n)"
 private const val MSG_JOB_GONE = "任务不存在"
 /** Status-text suffix for precise-mode records. */
 const val MSG_PRECISE_SUFFIX = " · 高精"
+/** Server's final message when a precise job fell back to fast reconstruction (docs/api.md). */
+const val MSG_PRECISE_FALLBACK = "完成（高精位姿失败，已按快速模式重建）"
+/** Prefix of the message a failed `POST /jobs/{id}/rerun` request leaves on an otherwise untouched record. */
+const val MSG_RERUN_FAILED_PREFIX = "重算失败："
+/** Server's plain final message; not worth keeping on the record. */
+private const val MSG_DONE = "完成"
 /** Server message prefix of the precise-mode pose stages (docs/api.md). */
 const val MSG_POSE_STAGE_PREFIX = "位姿优化"
 
@@ -133,14 +139,17 @@ class UploadViewModel(
     fun rerun(roomId: String, captureId: String, mode: String) {
         val jobId = repo.capture(roomId, captureId).jobId
         if (jobId == null) {
-            fail(roomId, captureId, MSG_JOB_GONE, jobGone = true)
+            rerunFailed(roomId, captureId, MSG_JOB_GONE, jobGone = true)
             return
         }
         launchOnce(roomId, captureId) {
             val newId = try {
                 api.rerunJob(jobId, mode)
             } catch (e: ApiException) {
-                fail(roomId, captureId, e.messageZh, jobGone = e.code == 404)
+                // Nothing started on the server: the capture stays as it was (done + viewable), only the
+                // reason is shown. A plain 404 can also be an old server without the route, so only the
+                // server's own 任务不存在 means the job is gone.
+                rerunFailed(roomId, captureId, e.messageZh, jobGone = e.messageZh == MSG_JOB_GONE)
                 return@launchOnce
             }
             repo.editCapture(roomId, captureId) {
@@ -312,7 +321,8 @@ class UploadViewModel(
                         }
                     }
                     repo.editCapture(roomId, captureId) {
-                        it.copy(state = "done", progress = 1f, message = null, scenePath = dest.path)
+                        // Keep a non-default final note (the precise-mode fallback); plain 完成 stays null.
+                        it.copy(state = "done", progress = 1f, message = status.message.takeIf { m -> m != MSG_DONE }, scenePath = dest.path)
                     }
                     return
                 }
@@ -326,6 +336,17 @@ class UploadViewModel(
                 }
             }
             delay(poll)
+        }
+    }
+
+    /** A rerun request that never produced a job: keep state / scene, record the reason; never throws. */
+    private fun rerunFailed(roomId: String, captureId: String, reason: String, jobGone: Boolean) {
+        try {
+            repo.editCapture(roomId, captureId) {
+                it.copy(message = MSG_RERUN_FAILED_PREFIX + reason, jobId = if (jobGone) null else it.jobId)
+            }
+        } catch (e: Exception) {
+            log("could not record rerun failure for $roomId/$captureId: $reason", e)
         }
     }
 
@@ -379,7 +400,8 @@ fun captureStatusText(record: CaptureRecord): String {
         "training" -> (record.message?.takeIf { it.startsWith(MSG_POSE_STAGE_PREFIX) } ?: "训练中 $pct%") + modeSuffix(record)
         // While downloading the message is "正在下载模型…", possibly with a reconnect suffix.
         "exporting" -> record.message?.takeIf { it.startsWith(MSG_DOWNLOADING) } ?: ("导出中" + modeSuffix(record))
-        "done" -> "完成" + modeSuffix(record)
+        // A done record carries a message only for the server's fallback note or a failed rerun request.
+        "done" -> record.message ?: ("完成" + modeSuffix(record))
         STATE_REMOTE -> "仅云端"
         "failed" -> "失败：${record.message ?: "未知原因"}"
         else -> record.state
@@ -429,12 +451,16 @@ fun rowActions(record: CaptureRecord): List<Pair<String, RowAction>> = when (rec
 /** ⋮ menu entry that re-reconstructs a finished capture in the other mode; null when not offered. */
 fun rerunMenuLabel(record: CaptureRecord): String? = when {
     record.state != "done" -> null
-    record.mode == MODE_PRECISE -> "改用快速重算"
+    effectiveMode(record) == MODE_PRECISE -> "改用快速重算"
     else -> "改用高精重算"
 }
 
-/** The mode [rerunMenuLabel] switches to: the opposite of the record's. */
-fun rerunMenuMode(record: CaptureRecord): String = if (record.mode == MODE_PRECISE) MODE_FAST else MODE_PRECISE
+/** The mode [rerunMenuLabel] switches to: the opposite of the one the model was really built with. */
+fun rerunMenuMode(record: CaptureRecord): String = if (effectiveMode(record) == MODE_PRECISE) MODE_FAST else MODE_PRECISE
+
+/** The mode the finished model was actually built with: a precise job that fell back produced a fast one. */
+private fun effectiveMode(record: CaptureRecord): String =
+    if (record.state == "done" && record.message == MSG_PRECISE_FALLBACK) MODE_FAST else record.mode
 
 /**
  * One capture: id, Chinese status, progress bar while uploading/training, its action button(s) and a ⋮ menu
@@ -460,22 +486,6 @@ fun CaptureRow(
                     Text(record.id, style = MaterialTheme.typography.titleSmall)
                     Text(captureStatusText(record), style = MaterialTheme.typography.bodyMedium)
                 }
-                if (showsPointsButton(record)) {
-                    TextButton(onClick = onViewPoints) { Text("看点云") }
-                }
-                val actions = rowActions(record)
-                actions.forEachIndexed { i, (label, action) ->
-                    val onClick: () -> Unit = {
-                        when (action) {
-                            is RowAction.Upload -> onUpload(action.mode)
-                            RowAction.Retry -> onRetry()
-                            RowAction.View -> onView()
-                            RowAction.Redownload -> onRedownload()
-                        }
-                    }
-                    if (i == actions.lastIndex) Button(onClick = onClick) { Text(label) }
-                    else OutlinedButton(onClick = onClick) { Text(label) }
-                }
                 Box {
                     IconButton(onClick = { menuOpen = true }, modifier = Modifier.semantics { contentDescription = "更多" }) {
                         Text("⋮", fontSize = 22.sp)
@@ -494,6 +504,30 @@ fun CaptureRow(
                     modifier = Modifier.fillMaxWidth(),
                 )
                 "queued", "exporting" -> LinearProgressIndicator(Modifier.fillMaxWidth())
+            }
+            // Buttons on their own line: two upload buttons plus 看点云 do not fit beside the status on a 360 dp phone.
+            val actions = rowActions(record)
+            val points = showsPointsButton(record)
+            if (actions.isNotEmpty() || points) {
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    if (points) TextButton(onClick = onViewPoints) { Text("看点云") }
+                    actions.forEachIndexed { i, (label, action) ->
+                        val onClick: () -> Unit = {
+                            when (action) {
+                                is RowAction.Upload -> onUpload(action.mode)
+                                RowAction.Retry -> onRetry()
+                                RowAction.View -> onView()
+                                RowAction.Redownload -> onRedownload()
+                            }
+                        }
+                        if (i == actions.lastIndex) Button(onClick = onClick) { Text(label) }
+                        else OutlinedButton(onClick = onClick) { Text(label) }
+                    }
+                }
             }
         }
     }

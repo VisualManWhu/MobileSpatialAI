@@ -30,8 +30,8 @@ def _drifted(truth):
     return np.stack(out)
 
 
-def _loop_capture(tmp_path, blank=()):
-    truth = loop_trajectory(N)
+def _loop_capture(tmp_path, blank=(), bob=0.25):
+    truth = loop_trajectory(N, bob=bob)
     noisy = _drifted(truth)
     images = [render_room(truth[i], K, W, H) for i in range(N)]
     for b in blank:
@@ -77,7 +77,7 @@ def test_loop_closes_and_poses_improve(tmp_path):
     assert err_out * 5 < err_in
     assert np.median(_aligned_center_err(res.c2w_cv, truth)) < np.median(_aligned_center_err(noisy, truth)) / 3
     assert 0.98 <= res.stats["scale"] <= 1.02
-    assert seen == sorted(seen) and seen[-1] == 1.0 and seen[0] <= 0.35
+    assert seen == sorted(seen) and seen[-1] == 1.0 and seen[0] == 0.0
     for k in ("registered_ratio", "shift_mean_m", "rot_mean_deg", "points3d", "reproj_px", "t_extract_s"):
         assert k in res.stats
 
@@ -111,3 +111,32 @@ def test_precise_pose_two_intrinsic_groups(tmp_path):
     res = precise_pose(cap, tmp_path / "colmap", lambda p: None)
     assert res.stats["cameras"] == 2
     assert res.registered.mean() >= 0.9
+
+
+def _sim3_to(src, dst):
+    """(scale, rotation angle deg) of the best similarity src -> dst on camera centres."""
+    a, b = src[:, :3, 3], dst[:, :3, 3]
+    ma, mb = a.mean(0), b.mean(0)
+    ac, bc = a - ma, b - mb
+    U, S, Vt = np.linalg.svd(bc.T @ ac / len(a))
+    D = np.eye(3)
+    D[2, 2] = np.sign(np.linalg.det(U @ Vt))
+    R = U @ D @ Vt
+    s = np.trace(np.diag(S) @ D) / ((ac ** 2).sum() / len(a))
+    return s, np.degrees(np.arccos(np.clip((np.trace(R) - 1) / 2, -1, 1)))
+
+
+@pytest.mark.slow
+def test_flat_trajectory_stays_in_arcore_frame(tmp_path):
+    """Camera centres all at one height: COLMAP's prior alignment can fail and the BA frame drift
+    (scale 0.90 seen); the result must still be Sim3-aligned back onto ARCore (spec §2 anti-goal)."""
+    from recon3d.recon.precise_pose import precise_pose
+    cap, truth, noisy = _loop_capture(tmp_path, bob=0.0)
+    res = precise_pose(cap, tmp_path / "colmap", lambda p: None)
+    assert res.registered.mean() >= 0.9
+    s, rot = _sim3_to(res.c2w_cv, noisy)
+    assert abs(s - 1.0) < 0.01 and rot < 0.5
+    assert np.median(_aligned_center_err(res.c2w_cv, truth)) < np.median(_aligned_center_err(noisy, truth)) / 3
+    for i in range(N):  # rotations stay orthonormal after the similarity
+        R = res.c2w_cv[i, :3, :3]
+        assert np.allclose(R @ R.T, np.eye(3), atol=1e-6)

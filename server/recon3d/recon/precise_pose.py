@@ -88,6 +88,7 @@ def precise_pose(cap: Capture, workdir: Path, on_progress: Callable[[float], Non
 
     workdir = Path(workdir)
     workdir.mkdir(parents=True, exist_ok=True)
+    on_progress(0.0)  # extraction starts now; the first group-done call comes minutes later
     image_dir = cap.root / "images"
     n = len(cap.frames)
     names: list[str] = []
@@ -250,11 +251,16 @@ def precise_pose(cap: Capture, workdir: Path, on_progress: Callable[[float], Non
         j = reg_idx[np.argmin(np.abs(reg_idx - i))]  # argmin -> first (smaller j) on ties
         c2w_new[i] = c2w_new[j] @ np.linalg.inv(c2w_arcore[j]) @ c2w_arcore[i]
 
-    # Umeyama sanity check (BA -> ARCore), statistic only: priors already pin the frame.
-    scale, R_al, _ = _umeyama(c2w_new[registered][:, :3, 3], c2w_arcore[registered][:, :3, 3])
+    # Sim3 (BA -> ARCore) on the registered centres, applied to every pose (spec §2: the result
+    # must stay in ARCore's metric frame). With working priors this is ~identity; when COLMAP's
+    # prior alignment fails (e.g. near-coplanar camera centres) the BA frame is arbitrary and the
+    # scale can slip by 5-10 %, which would put the poses at odds with the metric depth.
+    scale, R_al, t_al = _umeyama(c2w_new[registered][:, :3, 3], c2w_arcore[registered][:, :3, 3])
     rot_al = _rotation_angle_deg(R_al)
     if abs(scale - 1.0) > 0.05 or rot_al > 2.0:
-        log.warning("precise pose: BA frame drifted from ARCore (scale %.3f, rot %.2f deg)", scale, rot_al)
+        log.warning("precise pose: BA frame drifted from ARCore (scale %.3f, rot %.2f deg); realigned", scale, rot_al)
+    c2w_new[:, :3, :3] = R_al @ c2w_new[:, :3, :3]
+    c2w_new[:, :3, 3] = scale * (R_al @ c2w_new[:, :3, 3].T).T + t_al
 
     shift = np.linalg.norm(c2w_new[:, :3, 3] - c2w_arcore[:, :3, 3], axis=1)
     rot = np.array([_rotation_angle_deg(c2w_new[i, :3, :3] @ c2w_arcore[i, :3, :3].T) for i in range(n)])

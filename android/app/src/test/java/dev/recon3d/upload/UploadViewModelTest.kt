@@ -483,23 +483,58 @@ class UploadViewModelTest {
         api.rerunFailure = ApiException("上传未完成", code = 409)
         vm.rerun(room, cap, "precise"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
-        assertEquals("failed", rec.state); assertEquals("上传未完成", rec.message)
+        // A request that never started a job must not break the finished capture: still done, still viewable.
+        assertEquals("done", rec.state); assertEquals("重算失败：上传未完成", rec.message)
+        assertEquals("重算失败：上传未完成", captureStatusText(rec))
         assertEquals(oldScene, rec.scenePath); assertEquals("j", rec.jobId)  // 409 is not "job gone"
+        assertEquals("fast", rec.mode)
+        assertEquals(listOf("查看 3D"), rowActions(rec).map { it.first })
     }
 
-    @Test fun rerunJobGone404DropsJobId() = runTest {
+    @Test fun rerunJobGone404DropsJobIdButKeepsDone() = runTest {
         val vm = vm()
         vm.start(room, cap, "fast"); advanceUntilIdle()
         api.rerunFailure = ApiException("任务不存在", code = 404)
         vm.rerun(room, cap, "precise"); advanceUntilIdle()
         val rec = repo.capture(room, cap)
-        assertEquals("failed", rec.state); assertNull(rec.jobId)
+        assertEquals("done", rec.state); assertNull(rec.jobId)
+        assertEquals("重算失败：任务不存在", rec.message)
     }
 
-    @Test fun rerunWithoutJobIdFails() = runTest {
+    @Test fun rerunAgainstOldServer404KeepsJobId() = runTest {
+        // A server without POST /jobs/{id}/rerun answers FastAPI's plain 404: the job still exists.
+        val vm = vm()
+        vm.start(room, cap, "fast"); advanceUntilIdle()
+        api.rerunFailure = ApiException("Not Found", code = 404)
+        vm.rerun(room, cap, "precise"); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("done", rec.state); assertEquals("j", rec.jobId)
+        assertEquals("重算失败：Not Found", rec.message)
+    }
+
+    @Test fun rerunWithoutJobIdLeavesStateAndReportsMessage() = runTest {
         vm().rerun(room, cap, "precise"); advanceUntilIdle()
-        assertEquals("failed", repo.capture(room, cap).state)
+        val rec = repo.capture(room, cap)
+        assertEquals("local", rec.state); assertEquals("重算失败：任务不存在", rec.message)
         assertTrue(api.rerunCalls.isEmpty())
+    }
+
+    @Test fun doneKeepsServerFallbackNoteAndOffersPreciseAgain() = runTest {
+        val vm = vm()
+        api.jobResult = JobStatus("j", JobState.DONE, 1f, MSG_PRECISE_FALLBACK)
+        vm.start(room, cap, "precise"); advanceUntilIdle()
+        val rec = repo.capture(room, cap)
+        assertEquals("done", rec.state); assertEquals(MSG_PRECISE_FALLBACK, rec.message)
+        assertEquals(MSG_PRECISE_FALLBACK, captureStatusText(rec))  // not "完成 · 高精": the model is fast quality
+        assertEquals("改用高精重算", rerunMenuLabel(rec)); assertEquals("precise", rerunMenuMode(rec))
+        assertEquals(listOf("查看 3D"), rowActions(rec).map { it.first })
+    }
+
+    @Test fun donePlainMessageStaysNull() = runTest {
+        vm().start(room, cap, "precise"); advanceUntilIdle()  // FakeApi's default DONE message is 完成
+        val rec = repo.capture(room, cap)
+        assertNull(rec.message); assertEquals("完成 · 高精", captureStatusText(rec))
+        assertEquals("改用快速重算", rerunMenuLabel(rec))
     }
 
     @Test fun statusTextPreciseSuffixAndPoseStage() {

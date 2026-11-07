@@ -153,7 +153,9 @@ def test_pipeline_precise_uses_refined_poses_and_stage_messages(tmp_path, monkey
     captured = {}
 
     def fake_precise(cap, workdir, on_progress):
-        on_progress(0.2)
+        workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / "db.db").write_bytes(b"sift")  # COLMAP leaves ~1 GB here per 1000 frames
+        on_progress(0.35)  # real precise_pose's first call: a whole intrinsic group extracted
         on_progress(0.6)
         on_progress(1.0)
         c2w = np.stack([gl_to_cv_c2w(f.pose) for f in cap.frames])
@@ -174,8 +176,10 @@ def test_pipeline_precise_uses_refined_poses_and_stage_messages(tmp_path, monkey
     assert captured["override"] is not None and captured["override"][0, 0, 3] != 0
     assert np.allclose(np.load(job / "poses_cv.npy"), captured["override"])  # kept for eval_scene / drift tools
     assert (job / "pose_stats.json").is_file()
+    assert seen[0] == (0.0, "位姿优化 (特征提取)")  # extraction is shown from the first second, not 训练中 0%
     msgs = [m for _, m in seen if m]
     assert msgs[0] == "位姿优化 (特征提取)" and "位姿优化 (特征匹配)" in msgs and "位姿优化 (全局优化)" in msgs
+    assert not (job / "colmap").exists()  # workdir removed with the job's other scratch
     ps = [p for p, _ in seen]
     assert ps == sorted(ps) and max(p for p, m in seen if m) <= 0.3 + 1e-9
     assert ps[-1] == 1.0 and any(abs(p - 0.9) < 1e-9 for p in ps)
@@ -205,3 +209,21 @@ def test_precise_import_error_falls_back(tmp_path, monkeypatch):
     note = run_pipeline(job, PROFILES["laptop"], lambda p, m: None, mode="precise")
     assert note == "完成（高精位姿失败，已按快速模式重建）"
     assert "ImportError" in (job / "log.txt").read_text(encoding="utf-8")
+
+
+def test_pipeline_keeps_colmap_workdir_when_asked(tmp_path, monkeypatch):
+    import recon3d.jobs.pipeline as pl
+
+    _fake_training(monkeypatch)
+    job = _job_with_capture(tmp_path)
+
+    def fake_precise(cap, workdir, on_progress):
+        workdir.mkdir(parents=True, exist_ok=True)
+        (workdir / "db.db").write_bytes(b"sift")
+        c2w = np.stack([gl_to_cv_c2w(f.pose) for f in cap.frames])
+        return PrecisePoseResult(c2w_cv=c2w, registered=np.ones(4, bool), stats={})
+
+    monkeypatch.setattr(pl, "precise_pose", fake_precise, raising=False)
+    monkeypatch.setenv("RECON3D_KEEP_COLMAP", "1")
+    run_pipeline(job, PROFILES["laptop"], lambda p, m: None, mode="precise")
+    assert (job / "colmap" / "db.db").is_file()

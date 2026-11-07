@@ -46,8 +46,12 @@ def run_pipeline(job_dir: Path, profile: Profile, on_progress: OnProgress, mode:
         traceback.clear_frames(e.__traceback__)
         raise
     finally:
-        # Extracted frames are large and not needed after training.
+        # Extracted frames are large and not needed after training. The COLMAP workdir (features,
+        # matches, sparse models: ~1 GB per 1000 frames) goes too; poses_cv.npy / pose_stats.json keep
+        # what the offline tools need. RECON3D_KEEP_COLMAP=1 keeps it for debugging.
         shutil.rmtree(workdir, ignore_errors=True)
+        if os.environ.get("RECON3D_KEEP_COLMAP") != "1":
+            shutil.rmtree(job_dir / "colmap", ignore_errors=True)
         _release_gpu_memory()
 
 
@@ -64,6 +68,7 @@ def _run(job_dir: Path, workdir: Path, profile: Profile, on_progress: OnProgress
     train_start = 0.0
     if mode == "precise":
         train_start = POSE_SHARE
+        on_progress(0.0, STAGE_EXTRACT)  # shown at once; precise_pose's own first call may be minutes away
         try:
             result = _precise_pose_fn()(
                 cap, job_dir / "colmap", lambda q: on_progress(POSE_SHARE * q, _pose_stage(q))

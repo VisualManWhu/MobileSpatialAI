@@ -150,10 +150,12 @@
   旧的 `scene.splat` 仍在手机上；完成后"查看 3D"回来，模型已换成新的；状态页多了一个新任务，其 `log.txt` 第一行
   `created from <旧任务 id> (rerun, mode=precise)`；两个任务目录的 `capture.zip` 是同一个文件（硬链接，`ls -li` inode 相同）
 - [ ] 重算期间"彻底删除"该拍摄：Toast "任务正在训练，完成后再删"；完成后"彻底删除"把旧任务和新任务目录都删掉（`serverIds` 累积）
-- [ ] 重算请求失败（例如先在电脑上 `curl -X DELETE` 删掉旧任务再点"改用高精重算"）：行显示"失败：任务不存在"，
-  "查看 3D" 不可用但本地模型文件仍在；按钮为"快速重传 / 高精重传"
+- [ ] 重算请求失败（例如先在电脑上 `curl -X DELETE` 删掉旧任务再点"改用高精重算"）：行仍是完成状态，状态文字变
+  "重算失败：任务不存在"，"查看 3D" 照常可用（本地模型没动）；对连不上的服务端则是"重算失败：连不上计算端…"
 - [ ] 回退：在服务端 venv 里临时卸掉 pycolmap（`uv pip uninstall pycolmap`）后高精上传：任务照常完成，
-  手机和状态页都显示"完成（高精位姿失败，已按快速模式重建）"，`log.txt` 有 `ImportError`；装回后恢复
+  手机行和状态页都显示"完成（高精位姿失败，已按快速模式重建）"（手机上不带" · 高精"），⋮ 菜单仍是"改用高精重算"；
+  `log.txt` 有 `ImportError`；装回后恢复
+- [ ] 高精任务完成后服务端目录里没有 `colmap/`（COLMAP 中间文件约 1 GB / 千帧，已清理；`RECON3D_KEEP_COLMAP=1` 启动可保留）
 - [ ] 电脑上换模式重算：`curl -X POST http://localhost:8765/api/v1/jobs/<id>/rerun -H 'Content-Type: application/json' -d '{"mode":"precise"}'`
   返回 `201 {"job_id": …}`；`mode` 写错返回 422；对上传中的 id 返回 `409 {"detail":"上传未完成"}`
 - [ ] 高精任务目录里有 `poses_cv.npy`、`pose_stats.json`；`uv run python scripts/pose_drift.py data/jobs/<id>` 生成 `pose_drift.csv` 和 `trajectory.png`
