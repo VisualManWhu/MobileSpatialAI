@@ -9,6 +9,7 @@
 //   loadScene(url, homeHint?)           -> Promise<number>  (gaussian count)
 //   flyTo({x,y,z}, {x,y,z} lookAt, ms)  -> Promise<void>    (smooth ease-in-out)
 //   setCameraHome()
+//   setRoam(on)                         漫游 (free-fly) mode on/off; also the page's own button
 // Coordinates are the scene WORLD frame (same as .splat positions). That frame is ARCore's
 // world (+Y up), identical to three.js's, so no conversion is applied — see worldToThree().
 
@@ -25,16 +26,23 @@ import {
   worldToThree,
   withTimeout,
 } from "./scene-math.js";
+import { forwardOf, roamStep, yawPitchFromDirection } from "./roam-math.js";
+import { attachJoystick } from "./joystick.js";
 
 const MSG_LOAD_FAILED = "场景文件加载失败";
 const FOV = 60;
 const INIT_TIMEOUT_MS = 45000; // < the app's 60 s watchdog, so the specific error wins
+const LABEL_ROAM = "漫游"; // button shows the mode you would switch TO
+const LABEL_ORBIT = "环绕";
+const ORBIT_RESUME_DIST_M = 2; // leaving roam: orbit target this far ahead of the camera
+const MAX_STEP_S = 0.1; // a long frame (tab hidden, sort stall) must not teleport the camera
 
 // Created in init() inside boot()'s try: a WebGL2 / wasm / worker failure must reach onError.
 let renderer = null;
 let scene = null;
 let camera = null;
 let controls = null;
+let roam = null; // { yaw, pitch, move: {x,y}, look: {x,y}, lastT } while in 漫游 mode
 
 function init() {
   renderer = new THREE.WebGLRenderer({ antialias: false });
@@ -65,6 +73,85 @@ function init() {
     renderer.setSize(window.innerWidth, window.innerHeight);
     requestRender();
   });
+
+  initRoamUi();
+}
+
+/** 漫游 overlay (index.html): toggle button + two joysticks. Left = move, right = look. */
+function initRoamUi() {
+  const toggle = document.getElementById("roam-toggle");
+  const stick = (id, apply) => {
+    const ring = document.getElementById(id);
+    if (!ring) return;
+    attachJoystick(ring, ring.querySelector(".knob"), (v) => {
+      if (!roam) return;
+      apply(v);
+      requestRender();
+    });
+  };
+  stick("stick-move", (v) => (roam.move = v));
+  stick("stick-look", (v) => (roam.look = v));
+  if (toggle) toggle.addEventListener("click", () => setRoam(!roam));
+}
+
+/** Enters / leaves 漫游 mode. Entering keeps the current view; leaving orbits around a point ahead. */
+function setRoam(on) {
+  if (!camera || Boolean(on) === Boolean(roam)) return;
+  cancelFlight();
+  const toggle = document.getElementById("roam-toggle");
+  if (on) {
+    roam = { yaw: 0, pitch: 0, move: { x: 0, y: 0 }, look: { x: 0, y: 0 }, lastT: 0 };
+    syncRoamFromCamera();
+    controls.enabled = false;
+    document.body.classList.add("roam");
+    if (toggle) toggle.textContent = LABEL_ORBIT;
+  } else {
+    const f = forwardOf(roam.yaw, roam.pitch);
+    roam = null;
+    controls.target.set(
+      camera.position.x + f.x * ORBIT_RESUME_DIST_M,
+      camera.position.y + f.y * ORBIT_RESUME_DIST_M,
+      camera.position.z + f.z * ORBIT_RESUME_DIST_M,
+    );
+    controls.enabled = true;
+    controls.update();
+    document.body.classList.remove("roam");
+    if (toggle) toggle.textContent = LABEL_ROAM;
+  }
+  requestRender();
+}
+
+/** Re-derives yaw/pitch from the camera -> orbit target line (after flyTo / home while roaming). */
+function syncRoamFromCamera() {
+  if (!roam) return;
+  const d = {
+    x: controls.target.x - camera.position.x,
+    y: controls.target.y - camera.position.y,
+    z: controls.target.z - camera.position.z,
+  };
+  const yp = yawPitchFromDirection(Math.hypot(d.x, d.y, d.z) > 1e-6 ? d : forwardOf(0, 0));
+  roam.yaw = yp.yaw;
+  roam.pitch = yp.pitch;
+  roam.lastT = 0;
+}
+
+function roamFrame(now) {
+  const dt = roam.lastT ? Math.min(MAX_STEP_S, (now - roam.lastT) / 1000) : 0;
+  roam.lastT = now;
+  const pushing = roam.move.x || roam.move.y || roam.look.x || roam.look.y;
+  if (!pushing) {
+    roam.lastT = 0; // next push starts a fresh clock, not one from seconds ago
+    return false;
+  }
+  const next = roamStep({ position: camera.position, yaw: roam.yaw, pitch: roam.pitch }, roam.move, roam.look, dt);
+  roam.yaw = next.yaw;
+  roam.pitch = next.pitch;
+  const f = forwardOf(next.yaw, next.pitch);
+  camera.position.set(next.position.x, next.position.y, next.position.z);
+  // Keep the orbit target one unit ahead so leaving roam / flyTo start from a sane line of sight.
+  controls.target.set(next.position.x + f.x, next.position.y + f.y, next.position.z + f.z);
+  camera.lookAt(controls.target);
+  return true;
 }
 
 let mesh = null;
@@ -93,12 +180,17 @@ function frame(now) {
     if (t >= 1) {
       const done = flight.resolve;
       flight = null;
-      controls.enabled = true;
-      controls.update();
+      if (roam) syncRoamFromCamera();
+      else {
+        controls.enabled = true;
+        controls.update();
+      }
       done();
     } else {
       active = true;
     }
+  } else if (roam) {
+    active = roamFrame(now);
   } else {
     // update() returns true while damping is still moving the camera.
     active = controls.update();
@@ -116,7 +208,8 @@ function cancelFlight() {
   if (!flight) return;
   const done = flight.resolve;
   flight = null;
-  controls.enabled = true;
+  if (roam) syncRoamFromCamera();
+  else controls.enabled = true;
   done();
 }
 
@@ -152,7 +245,8 @@ function setCameraHome() {
   camera.position.set(home.position.x, home.position.y, home.position.z);
   controls.target.set(home.target.x, home.target.y, home.target.z);
   camera.lookAt(controls.target);
-  controls.update();
+  if (roam) syncRoamFromCamera();
+  else controls.update();
   requestRender();
 }
 
@@ -185,6 +279,8 @@ async function loadScene(url, homeHint = null) {
 
   home = homeView(bounds, FOV, camera.aspect, homeHint);
   setCameraHome();
+  const toggle = document.getElementById("roam-toggle");
+  if (toggle) toggle.hidden = false; // nothing to roam through before the first scene is up
   return count;
 }
 
@@ -217,5 +313,6 @@ async function boot() {
 window.loadScene = loadScene;
 window.flyTo = flyTo;
 window.setCameraHome = setCameraHome;
+window.setRoam = setRoam;
 
 boot();

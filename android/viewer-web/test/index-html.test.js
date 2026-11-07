@@ -38,3 +38,12 @@ test("works without the Android bridge (desktop debugging)", () => {
   const { listeners } = loadGuard({ withAndroid: false });
   assert.doesNotThrow(() => listeners.error({ message: "x" }));
 });
+
+test("index.html carries the roam toggle and both joystick rings (hidden until roam mode)", () => {
+  const html = readFileSync(new URL("../src/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="roam-toggle"/);
+  assert.match(html, /id="stick-move"/);
+  assert.match(html, /id="stick-look"/);
+  assert.match(html, /body:not\(\.roam\) \.stick \{ display: none; \}/);
+  assert.match(html, />漫游</); // default label: orbit mode is active
+});
