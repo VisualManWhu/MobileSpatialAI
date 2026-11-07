@@ -16,9 +16,12 @@
 
         <meta-data android:name="com.google.ar.core" android:value="required" />
 
+        <!-- Rotation must not recreate the activity: the viewer's WebView (a 10+ MB scene, 漫游
+             state) would reload when 漫游 mode switches to landscape. Compose re-lays out itself. -->
         <activity
             android:name=".MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

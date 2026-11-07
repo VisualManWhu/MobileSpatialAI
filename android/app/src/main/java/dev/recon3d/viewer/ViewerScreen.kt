@@ -2,6 +2,7 @@ package dev.recon3d.viewer
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.content.pm.ActivityInfo
 import android.content.pm.ApplicationInfo
 import android.os.Handler
 import android.os.Looper
@@ -17,11 +18,13 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
+import androidx.activity.compose.LocalActivity
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
@@ -94,6 +97,18 @@ internal fun SceneViewer(scenePath: String, home: HomeView? = null) {
     // Each retry bumps the attempt: a fresh WebView, a fresh watchdog, stale callbacks ignored.
     var attempt by remember(scenePath) { mutableIntStateOf(0) }
     var state by remember(scenePath) { mutableStateOf<ViewerState>(ViewerState.Loading) }
+    var roaming by remember(scenePath) { mutableStateOf(false) }
+
+    // 漫游 mode is landscape-only (two thumbs on the joysticks); orbit mode follows the sensor.
+    // The manifest's configChanges keeps the WebView alive across the rotation.
+    val activity = LocalActivity.current
+    DisposableEffect(activity, roaming) {
+        if (activity == null) return@DisposableEffect onDispose {}
+        val lock = roaming // snapshot: by dispose time the state has already flipped
+        val old = activity.requestedOrientation
+        if (lock) activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        onDispose { if (lock) activity.requestedOrientation = old }
+    }
 
     LaunchedEffect(scenePath, attempt) {
         delay(WATCHDOG_MS)
@@ -113,9 +128,13 @@ internal fun SceneViewer(scenePath: String, home: HomeView? = null) {
                         home = home,
                         onLoaded = { if (mine == attempt) state = ViewerState.Loaded(it) },
                         onError = { if (mine == attempt) state = ViewerState.Failed(it) },
+                        onRoam = { if (mine == attempt) roaming = it },
                     )
                 },
-                onRelease = { it.destroy() },
+                onRelease = {
+                    roaming = false // a fresh WebView (retry) starts in orbit mode
+                    it.destroy()
+                },
             )
         }
         when (val s = state) {
@@ -147,12 +166,18 @@ private fun Message(text: String, onRetry: (() -> Unit)? = null) {
     }
 }
 
-/** Callbacks from viewer.js. Only the two annotated methods are visible to the page. */
+/** Callbacks from viewer.js. Only the annotated methods are visible to the page. */
 private class ViewerBridge(
     private val onLoadedMain: (Int) -> Unit,
     private val onErrorMain: (String) -> Unit,
+    private val onRoamMain: (Boolean) -> Unit = {},
 ) {
     private val main = Handler(Looper.getMainLooper())
+
+    @JavascriptInterface
+    fun onRoam(on: Boolean) {
+        main.post { onRoamMain(on) }
+    }
 
     @JavascriptInterface
     fun onLoaded(count: Int) {
@@ -172,6 +197,7 @@ private fun createViewerWebView(
     home: HomeView?,
     onLoaded: (Int) -> Unit,
     onError: (String) -> Unit,
+    onRoam: (Boolean) -> Unit = {},
 ): WebView {
     if (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0) {
         WebView.setWebContentsDebuggingEnabled(true) // chrome://inspect for manual flyTo() tests
@@ -192,7 +218,7 @@ private fun createViewerWebView(
         settings.domStorageEnabled = false
         settings.allowFileAccess = false
         settings.allowContentAccess = false
-        addJavascriptInterface(ViewerBridge(onLoaded, onError), "Android")
+        addJavascriptInterface(ViewerBridge(onLoaded, onError, onRoam), "Android")
         webViewClient = object : WebViewClient() {
             override fun shouldInterceptRequest(view: WebView, request: WebResourceRequest): WebResourceResponse? {
                 // Never touch the network: unknown hosts get 403, unmatched paths (incl. any

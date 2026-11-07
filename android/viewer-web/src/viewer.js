@@ -3,7 +3,8 @@
 // Page URL: index.html?scene=/scene/scene.splat[&home=x,y,z[&look=dx,dy,dz]]
 // (served by the app's WebViewAssetLoader). `home` is the capture trajectory's centre and `look`
 // the first frame's view direction, both in the scene world frame; see homeView().
-// Calls back into the app via the `Android` JavascriptInterface: onLoaded(count) / onError(msgZh).
+// Calls back into the app via the `Android` JavascriptInterface: onLoaded(count) / onError(msgZh) /
+// onRoam(on) (the app locks the screen to landscape while roaming).
 //
 // JS API on window (used by 第二期):
 //   loadScene(url, homeHint?)           -> Promise<number>  (gaussian count)
@@ -105,6 +106,7 @@ function setRoam(on) {
     controls.enabled = false;
     document.body.classList.add("roam");
     if (toggle) toggle.textContent = LABEL_ORBIT;
+    notifyRoam(true);
   } else {
     const f = forwardOf(roam.yaw, roam.pitch);
     roam = null;
@@ -117,8 +119,15 @@ function setRoam(on) {
     controls.update();
     document.body.classList.remove("roam");
     if (toggle) toggle.textContent = LABEL_ROAM;
+    notifyRoam(false);
   }
   requestRender();
+}
+
+/** Tells the app about the mode change; older app builds without onRoam are fine. */
+function notifyRoam(on) {
+  const a = window.Android;
+  if (a && typeof a.onRoam === "function") a.onRoam(on);
 }
 
 /** Re-derives yaw/pitch from the camera -> orbit target line (after flyTo / home while roaming). */
