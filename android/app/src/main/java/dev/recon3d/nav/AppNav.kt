@@ -217,7 +217,7 @@ fun AppNav(graph: AppGraph, modifier: Modifier = Modifier) {
         composable(Routes.VIEWER) { entry ->
             val roomId = entry.arguments?.getString("roomId") ?: return@composable
             val captureId = entry.arguments?.getString("captureId") ?: return@composable
-            ViewerScreen(repo = graph.rooms, roomId = roomId, captureId = captureId)
+            ViewerScreen(repo = graph.rooms, roomId = roomId, captureId = captureId, objects = graph.objects)
         }
     }
 }

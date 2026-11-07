@@ -42,3 +42,13 @@ class ObjectsTableTest {
         assertEquals("杯子 1", itemTitle(groups[1], 0))
     }
 }
+
+class FlyToObjectJsTest {
+    @Test fun `builds the viewer call with locale-safe numbers`() {
+        val e = ObjectEntry(7, "cup", "杯子", 0.5f, 2, listOf(1.5f, -0.25f, 2f), Bbox(listOf(1f, -1f, 1f), listOf(2f, 0.5f, 3f)), 4, "thumbs/7.jpg")
+        assertEquals(
+            """window.flyToObject(7, {"x":1.5,"y":-0.25,"z":2.0}, {"x":1.0,"y":-1.0,"z":1.0}, {"x":2.0,"y":0.5,"z":3.0})""",
+            flyToObjectJs(e),
+        )
+    }
+}

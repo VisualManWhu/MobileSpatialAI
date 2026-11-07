@@ -53,3 +53,9 @@ fun ObjectsTable.grouped(): List<ObjectGroup> =
 fun groupTitle(group: ObjectGroup): String = "${group.labelZh} ×${group.items.size}"
 
 fun itemTitle(group: ObjectGroup, index: Int): String = "${group.labelZh} ${index + 1}"
+
+/** The JS call that flies the viewer to [entry] and highlights it (numbers via kotlinx, never locale formatted). */
+fun flyToObjectJs(entry: ObjectEntry): String {
+    fun v(c: List<Float>) = """{"x":${c[0]},"y":${c[1]},"z":${c[2]}}"""
+    return "window.flyToObject(${entry.id}, ${v(entry.center)}, ${v(entry.bbox.min)}, ${v(entry.bbox.max)})"
+}
