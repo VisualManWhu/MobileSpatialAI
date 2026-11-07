@@ -8,9 +8,11 @@ from collections.abc import Callable
 from pathlib import Path
 
 from recon3d.capture.format import CaptureFormatError
+from recon3d.jobs.pipeline import OnProgress
 from recon3d.jobs.store import JobStore
 
-Pipeline = Callable[[Path, Callable[[float], None]], None]
+# (job_dir, mode, on_progress) -> final "done" message to use instead of 完成, or None.
+Pipeline = Callable[[Path, str, OnProgress], str | None]
 
 OOM_MESSAGE = "显存不足，请降低分辨率或改用服务器"
 EXPORT_START = 0.9
@@ -69,21 +71,25 @@ class Worker:
 
     def _run(self, job_id: str) -> None:
         store = self.store
-        if store.get(job_id) is None:
+        status = store.get(job_id)
+        if status is None:
             return  # deleted while queued (DELETE /jobs/{id}); nothing left to run
         store.update(job_id, state="training", progress=0.0, message="训练中")
 
-        def on_progress(p: float) -> None:
+        def on_progress(p: float, message: str | None = None) -> None:
+            """message: stage text from the pipeline (precise-mode pose stages); None = by progress."""
             p = min(max(float(p), 0.0), 1.0)
-            if p >= EXPORT_START:
+            if message is not None:
+                store.update(job_id, state="training", progress=p, message=message)
+            elif p >= EXPORT_START:
                 store.update(job_id, state="exporting", progress=p, message="导出中")
             else:
                 store.update(job_id, state="training", progress=p, message="训练中")
 
         try:
-            self.pipeline(store.job_dir(job_id), on_progress)
+            note = self.pipeline(store.job_dir(job_id), status.mode, on_progress)
         except Exception as e:
             store.log(job_id, "pipeline failed:\n" + traceback.format_exc().rstrip())
             store.update(job_id, state="failed", message=failure_message(e, job_id))
         else:
-            store.update(job_id, state="done", progress=1.0, message="完成")
+            store.update(job_id, state="done", progress=1.0, message=note or "完成")

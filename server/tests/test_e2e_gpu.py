@@ -38,7 +38,7 @@ def test_synthetic_capture_to_splat_via_worker(tmp_path):
 
     profile = replace(PROFILES["laptop"], iterations=1000)
     store = JobStore(tmp_path / "data")
-    worker = Worker(store, lambda d, p: run_pipeline(d, profile, p))
+    worker = Worker(store, lambda d, m, p: run_pipeline(d, profile, p, m))
     worker.start()
     try:
         job_id = store.create(io.BytesIO(zip_path.read_bytes()))

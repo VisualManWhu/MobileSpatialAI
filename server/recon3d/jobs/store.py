@@ -74,6 +74,9 @@ class ResumableInfo:
     updated_at: float
 
 
+MODES = ("fast", "precise")
+
+
 @dataclass(frozen=True)
 class JobStatus:
     job_id: str
@@ -81,6 +84,7 @@ class JobStatus:
     progress: float
     message: str
     created_at: float
+    mode: str = "fast"  # "fast" | "precise"; absent in status.json written before precise mode
 
 
 class Upload:
@@ -144,9 +148,9 @@ class JobStore:
             raise
         return up.commit()
 
-    def _commit(self, job_id: str, size: int) -> None:
-        self._write(JobStatus(job_id, "queued", 0.0, "排队中", time.time()))
-        self.log(job_id, f"created ({size} bytes), state=queued")
+    def _commit(self, job_id: str, size: int, mode: str = "fast") -> None:
+        self._write(JobStatus(job_id, "queued", 0.0, "排队中", time.time(), mode))
+        self.log(job_id, f"created ({size} bytes), state=queued, mode={mode}")
         self.queue.put(job_id)
 
     def get(self, job_id: str) -> JobStatus | None:

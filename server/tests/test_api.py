@@ -16,7 +16,7 @@ def _client(tmp_path, pipeline, **store_kw):
     return TestClient(app)
 
 
-def _fast(d, p):
+def _fast(d, m, p):
     (d / "scene.splat").write_bytes(b"\x01" * 64)
 
 
@@ -29,7 +29,7 @@ def client(tmp_path):
 @pytest.fixture
 def client_slow(tmp_path):
     release = threading.Event()
-    with _client(tmp_path, lambda d, p: release.wait()) as c:
+    with _client(tmp_path, lambda d, m, p: release.wait()) as c:
         yield c
         release.set()
 

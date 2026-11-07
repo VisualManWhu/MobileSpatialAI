@@ -15,8 +15,8 @@ def build_app(profile: Profile, data_dir: Path, max_upload_bytes: int = DEFAULT_
 
     store = JobStore(data_dir, max_upload_bytes=max_upload_bytes)
 
-    def pipeline(job_dir: Path, on_progress) -> None:
-        run_pipeline(job_dir, profile, on_progress)
+    def pipeline(job_dir: Path, mode: str, on_progress) -> str | None:
+        return run_pipeline(job_dir, profile, on_progress, mode)
 
     return create_app(store, Worker(store, pipeline), profile)
 

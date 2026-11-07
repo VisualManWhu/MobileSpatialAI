@@ -84,7 +84,7 @@ def test_create_rejects_oversize_and_cleans_up(tmp_path):
 
 def test_jobs_run_in_order(store, make_worker):
     order = []
-    w = make_worker(lambda d, p: order.append(d.name))
+    w = make_worker(lambda d, m, p: order.append(d.name))
     w.start()
     a, b = store.create(io.BytesIO(b"a")), store.create(io.BytesIO(b"b"))
     wait_until(lambda: store.get(b).state == "done")
@@ -95,7 +95,7 @@ def test_jobs_run_in_order(store, make_worker):
 def test_oom_marks_failed_and_continues(store, make_worker):
     calls = iter([torch.cuda.OutOfMemoryError(), None])
 
-    def pipe(d, p):
+    def pipe(d, m, p):
         e = next(calls)
         if e:
             raise e
@@ -108,7 +108,7 @@ def test_oom_marks_failed_and_continues(store, make_worker):
 
 
 def test_capture_format_error_uses_chinese_message(store, make_worker):
-    def pipe(d, p):
+    def pipe(d, m, p):
         raise CaptureFormatError("拍摄包不是有效的 zip 文件")
 
     make_worker(pipe).start()
@@ -118,7 +118,7 @@ def test_capture_format_error_uses_chinese_message(store, make_worker):
 
 
 def test_other_error_message_and_traceback_logged(store, make_worker):
-    def pipe(d, p):
+    def pipe(d, m, p):
         raise ValueError("boom")
 
     make_worker(pipe).start()
@@ -134,7 +134,7 @@ def test_other_error_message_and_traceback_logged(store, make_worker):
 def test_progress_maps_to_states(store, make_worker):
     seen = []
 
-    def pipe(d, p):
+    def pipe(d, m, p):
         p(0.45)
         seen.append(store.get(d.name))
         p(0.95)
@@ -160,14 +160,14 @@ def test_restart_recovery(store):
 
 
 def test_worker_stop_joins_thread(store):
-    w = Worker(store, lambda d, p: None)
+    w = Worker(store, lambda d, m, p: None)
     w.start()
     w.stop()
     assert not w.is_alive()
 
 
 def test_oom_detected_from_runtime_error_message(store, make_worker):
-    def pipe(d, p):
+    def pipe(d, m, p):
         raise RuntimeError("CUDA error: out of memory")
 
     make_worker(pipe).start()
@@ -192,7 +192,7 @@ def test_oom_detection_paths():
 def test_start_twice_runs_one_thread(store):
     import threading
 
-    w = Worker(store, lambda d, p: None)
+    w = Worker(store, lambda d, m, p: None)
     w.start()
     w.start()
     try:
@@ -431,6 +431,44 @@ def test_delete_queued_job_is_skipped_by_worker(store, make_worker):
     j1 = store.create(io.BytesIO(b"a"))
     j2 = store.create(io.BytesIO(b"b"))
     store.delete(j1)
-    make_worker(lambda d, p: ran.append(d.name)).start()
+    make_worker(lambda d, m, p: ran.append(d.name)).start()
     wait_until(lambda: store.get(j2) is not None and store.get(j2).state == "done")
     assert ran == [j2] and not store.job_dir(j1).exists()
+
+
+def test_status_mode_defaults_to_fast_for_old_status_json(store):
+    j = store.create(io.BytesIO(b"x"))
+    d = store.job_dir(j)
+    raw = json.loads((d / "status.json").read_text(encoding="utf-8"))
+    raw.pop("mode")
+    (d / "status.json").write_text(json.dumps(raw), encoding="utf-8")
+    assert store.get(j).mode == "fast"
+
+
+def test_worker_passes_mode_and_stage_messages(store, make_worker):
+    j = store.create(io.BytesIO(b"x"))
+    store.update(j, mode="precise")
+    seen = []
+
+    def pipe(d, mode, on_progress):
+        seen.append(mode)
+        on_progress(0.1, "位姿优化 (特征提取)")
+        seen.append(store.get(j).message)
+        on_progress(0.5, None)
+        seen.append(store.get(j).message)
+        return "完成（高精位姿失败，已按快速模式重建）"
+
+    w = make_worker(pipe)
+    w.start()
+    wait_until(lambda: store.get(j).state == "done")
+    assert seen == ["precise", "位姿优化 (特征提取)", "训练中"]
+    assert store.get(j).message == "完成（高精位姿失败，已按快速模式重建）"
+    assert store.get(j).progress == 1.0
+
+
+def test_worker_default_done_message_when_pipeline_returns_none(store, make_worker):
+    j = store.create(io.BytesIO(b"x"))
+    w = make_worker(lambda d, m, p: None)
+    w.start()
+    wait_until(lambda: store.get(j).state == "done")
+    assert store.get(j).message == "完成"
