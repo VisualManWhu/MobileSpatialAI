@@ -172,6 +172,8 @@ def test_pipeline_precise_uses_refined_poses_and_stage_messages(tmp_path, monkey
     note = run_pipeline(job, replace(PROFILES["laptop"], iterations=50), lambda p, m: seen.append((p, m)), mode="precise")
     assert note is None
     assert captured["override"] is not None and captured["override"][0, 0, 3] != 0
+    assert np.allclose(np.load(job / "poses_cv.npy"), captured["override"])  # kept for eval_scene / drift tools
+    assert (job / "pose_stats.json").is_file()
     msgs = [m for _, m in seen if m]
     assert msgs[0] == "位姿优化 (特征提取)" and "位姿优化 (特征匹配)" in msgs and "位姿优化 (全局优化)" in msgs
     ps = [p for p, _ in seen]

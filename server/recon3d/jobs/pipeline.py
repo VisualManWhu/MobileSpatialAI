@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import gc
+import json
 import os
 import shutil
 import sys
@@ -9,6 +10,8 @@ import time
 import traceback
 from collections.abc import Callable
 from pathlib import Path
+
+import numpy as np
 
 from recon3d.config import Profile
 
@@ -66,6 +69,9 @@ def _run(job_dir: Path, workdir: Path, profile: Profile, on_progress: OnProgress
                 cap, job_dir / "colmap", lambda q: on_progress(POSE_SHARE * q, _pose_stage(q))
             )
             c2w_override = result.c2w_cv
+            # Kept next to the scene for scripts/eval_scene.py --mode precise and drift inspection.
+            np.save(job_dir / "poses_cv.npy", result.c2w_cv)
+            (job_dir / "pose_stats.json").write_text(json.dumps(result.stats, indent=2), encoding="utf-8")
         except Exception as e:
             # PrecisePoseFailed (too few frames registered), ImportError (no pycolmap) or a
             # pycolmap crash: rebuild with the ARCore poses and say so in the final message.

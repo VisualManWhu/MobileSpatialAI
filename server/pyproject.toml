@@ -29,6 +29,7 @@ recon3d-server = "recon3d.main:cli"
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "matplotlib>=3.8",  # scripts/pose_drift.py trajectory plot
     "pytest>=8.0",
 ]
 

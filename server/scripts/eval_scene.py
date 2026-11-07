@@ -3,10 +3,12 @@
 Usage (Ubuntu, from server/):
   uv run python scripts/eval_scene.py <job_dir> [--profile laptop]
       evaluates <job_dir>/scene.ply (or <job_dir>/retrain-<tag>/scene.ply with --tag)
-  uv run python scripts/eval_scene.py <job_dir> --train [--tag NAME] [--pose-lr X] [--depth-lambda Y]
+  uv run python scripts/eval_scene.py <job_dir> --train [--tag NAME] [--mode fast|precise] [--pose-lr X] [--depth-lambda Y]
                                                          [--far-m R] [--bbox-margin-m M] [--support-far-m S] [--support-dist-m D]
       retrains capture.zip into <job_dir>/retrain-<tag>/ (default tag "new") with the job
       pipeline, then evaluates the new scene.ply
+  --mode precise: poses are refined with COLMAP first (recon/precise_pose.py); training and the
+      evaluation renders both use the refined poses, cached as poses_cv.npy next to the ply
 
 Metrics (also written to eval.json next to the evaluated ply):
   - PSNR of every training view rendered at its capture pose: median, min, worst 5 indices; plus the median
@@ -63,7 +65,7 @@ def _matched_mse(img, gt) -> float:
     return ((pred - y) ** 2).mean().item()
 
 
-def _train(job_dir: Path, out_dir: Path, profile: Profile) -> float:
+def _train(job_dir: Path, out_dir: Path, profile: Profile, mode: str = "fast") -> float:
     """Run the job pipeline on job_dir/capture.zip inside out_dir; returns wall seconds."""
     from recon3d.jobs.pipeline import run_pipeline
 
@@ -75,20 +77,43 @@ def _train(job_dir: Path, out_dir: Path, profile: Profile) -> float:
         except OSError:
             shutil.copyfile(job_dir / "capture.zip", zip_dst)
 
-    last = [-1]
+    last = [-1, None]
 
-    def on_progress(p: float) -> None:
+    def on_progress(p: float, message: str | None = None) -> None:
         pct = int(p * 100)
-        if pct // 10 != last[0] // 10:
-            last[0] = pct
-            print(f"训练进度 {pct}%（{time.monotonic() - t0:.0f} s）", flush=True)
+        if pct // 10 != last[0] // 10 or message != last[1]:
+            last[0], last[1] = pct, message
+            print(f"{message or '训练'}进度 {pct}%（{time.monotonic() - t0:.0f} s）", flush=True)
 
     t0 = time.monotonic()
-    run_pipeline(out_dir, profile, on_progress)
+    note = run_pipeline(out_dir, profile, on_progress, mode)
+    if note:
+        print(note, flush=True)
     return time.monotonic() - t0
 
 
-def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack_m: float = 0.5, offtrack_views: int = 12) -> dict:
+def _refined_poses(cap, out_dir: Path, tmp: Path) -> np.ndarray:
+    """Precise-mode poses for cap: out_dir/poses_cv.npy (written by the pipeline, or by an earlier
+    eval run), computed with precise_pose when missing."""
+    from recon3d.recon.precise_pose import precise_pose
+
+    cached = out_dir / "poses_cv.npy"
+    if cached.exists():
+        poses = np.load(cached)
+        if poses.shape == (len(cap.frames), 4, 4):
+            print(f"高精位姿：复用 {cached}", flush=True)
+            return poses
+    print("高精位姿：运行 COLMAP 优化…", flush=True)
+    res = precise_pose(cap, tmp / "colmap", lambda q: None)
+    print("高精位姿统计：" + json.dumps(res.stats, ensure_ascii=False), flush=True)
+    np.save(cached, res.c2w_cv)
+    return res.c2w_cv
+
+
+def evaluate(
+    job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack_m: float = 0.5, offtrack_views: int = 12,
+    mode: str = "fast",
+) -> dict:
     import torch
     from scipy.spatial import cKDTree
 
@@ -100,7 +125,8 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack
 
     with tempfile.TemporaryDirectory(prefix="recon3d-eval-") as tmp:
         cap = load_capture(job_dir / "capture.zip", Path(tmp))
-        ts = build_training_set(cap, profile)
+        override = _refined_poses(cap, out_dir, Path(tmp)) if mode == "precise" else None
+        ts = build_training_set(cap, profile, c2w_override=override)
         del cap
 
     splats = load_ply(ply, device="cuda")
@@ -149,6 +175,7 @@ def evaluate(job_dir: Path, ply: Path, profile: Profile, out_dir: Path, offtrack
     worst = np.argsort(psnr, kind="stable")[:WORST_K]
     return {
         "ply": str(ply),
+        "mode": mode,
         "profile": profile.name,
         "depth_lambda": profile.depth_lambda,
         "pose_lr": profile.pose_lr,
@@ -187,6 +214,8 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="离线评估重建结果（逐视角 PSNR、floater 分数）")
     ap.add_argument("job_dir", type=Path)
     ap.add_argument("--profile", default="laptop", choices=sorted(PROFILES))
+    ap.add_argument("--mode", default="fast", choices=["fast", "precise"],
+                    help="重建模式：precise 先用 COLMAP 优化位姿（训练和评估都用优化后的位姿，缓存在 poses_cv.npy）")
     ap.add_argument("--train", action="store_true", help="先用当前代码重训到 retrain-<tag>/ 再评估")
     ap.add_argument("--tag", default=None, help="重训目录名后缀（默认 new）")
     ap.add_argument("--pose-lr", type=float, default=None)
@@ -253,11 +282,11 @@ def main(argv: list[str] | None = None) -> int:
     train_s = None
     if args.train:
         out_dir = job_dir / f"retrain-{args.tag or 'new'}"
-        print(f"重训到 {out_dir}（depth_lambda={profile.depth_lambda}, pose_lr={profile.pose_lr}, strategy={profile.strategy}）", flush=True)
+        print(f"重训到 {out_dir}（mode={args.mode}, depth_lambda={profile.depth_lambda}, pose_lr={profile.pose_lr}, strategy={profile.strategy}）", flush=True)
         if args.dump_pruned:
             os.environ["RECON3D_DUMP_PRUNED"] = "1"
         try:
-            train_s = _train(job_dir, out_dir, profile)
+            train_s = _train(job_dir, out_dir, profile, args.mode)
         finally:
             os.environ.pop("RECON3D_DUMP_PRUNED", None)
         if args.dump_pruned and (out_dir / "pruned.ply").exists():
@@ -266,7 +295,7 @@ def main(argv: list[str] | None = None) -> int:
         out_dir = job_dir / f"retrain-{args.tag}" if args.tag else job_dir
     ply = out_dir / "scene.ply"
 
-    res = evaluate(job_dir, ply, profile, out_dir, args.offtrack_m, args.offtrack_views)
+    res = evaluate(job_dir, ply, profile, out_dir, args.offtrack_m, args.offtrack_views, args.mode)
     if not args.train:
         # Training settings of an existing ply are unknown; don't report the profile's.
         for k in TRAIN_SETTINGS:
