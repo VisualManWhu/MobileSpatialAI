@@ -12,6 +12,8 @@ import anyio
 from anyio import to_thread
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from recon3d.api.upload import too_large
@@ -42,6 +44,7 @@ MISSING_OFFSET = "缺少 Upload-Offset"
 class UploadCreate(BaseModel):
     size: int = Field(gt=0)
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    mode: Literal["fast", "precise"] = "fast"  # reconstruction mode of the job this upload becomes
 
 
 def _with_received(status: int, detail: str, received: int) -> JSONResponse:
@@ -60,7 +63,7 @@ def router(store: JobStore) -> APIRouter:
     def create(body: UploadCreate):
         store.sweep_resumable()
         try:
-            info = store.begin_resumable(body.size, body.sha256)
+            info = store.begin_resumable(body.size, body.sha256, body.mode)
         except UploadTooLargeError:
             raise too_large(store) from None
         return {"upload_id": info.upload_id, "received": info.received}

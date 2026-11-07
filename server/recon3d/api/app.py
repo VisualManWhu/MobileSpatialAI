@@ -4,9 +4,11 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 from functools import lru_cache
+from typing import Literal
 
 from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from pydantic import BaseModel
 
 from recon3d import __version__
 from recon3d.api.resumable import BUSY
@@ -15,7 +17,7 @@ from recon3d.api.status_page import HTML as STATUS_PAGE
 from recon3d.api.upload import FORM_OVERHEAD, receive_capture
 from recon3d.api.upload import too_large as _too_large
 from recon3d.config import Profile
-from recon3d.jobs.store import JobActive, JobStore, UploadBusy
+from recon3d.jobs.store import JobActive, JobStore, UploadBusy, UploadInProgress
 from recon3d.jobs.worker import Worker
 
 log = logging.getLogger(__name__)
@@ -23,7 +25,12 @@ log = logging.getLogger(__name__)
 NOT_FOUND = "任务不存在"
 NOT_DONE = "任务尚未完成"
 TRAINING = "任务正在训练，完成后再删"
+UPLOAD_INCOMPLETE = "上传未完成"
 NO_GPU = "无 GPU"
+
+
+class RerunBody(BaseModel):
+    mode: Literal["fast", "precise"]
 
 
 @lru_cache(maxsize=1)
@@ -89,6 +96,7 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
                 "created_at": u.created_at,
                 "capture_bytes": u.size,
                 "has_scene": False,
+                "mode": u.mode,
             })
         for s in store.list():
             d = store.job_dir(s.job_id)
@@ -104,13 +112,26 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
                 "created_at": s.created_at,
                 "capture_bytes": size,
                 "has_scene": s.state == "done" and (d / "scene.splat").is_file(),
+                "mode": s.mode,
             })
         return {"jobs": out}
 
     @api.get("/jobs/{job_id}")
     def get_job(job_id: str):
         s = status_or_404(job_id)
-        return {"job_id": s.job_id, "state": s.state, "progress": s.progress, "message": s.message}
+        return {"job_id": s.job_id, "state": s.state, "progress": s.progress, "message": s.message, "mode": s.mode}
+
+    @api.post("/jobs/{job_id}/rerun", status_code=201)
+    def rerun_job(job_id: str, body: RerunBody):
+        """Queue a new job over an existing job's capture.zip in the given mode (hard-linked)."""
+        try:
+            new_id = store.rerun(job_id, body.mode)
+        except KeyError:
+            raise HTTPException(404, NOT_FOUND) from None
+        except UploadInProgress:
+            raise HTTPException(409, UPLOAD_INCOMPLETE) from None
+        log.info("rerun job %s -> %s (mode=%s)", job_id, new_id, body.mode)
+        return {"job_id": new_id}
 
     @api.delete("/jobs/{job_id}", status_code=204, response_class=Response)
     def delete_job(job_id: str):

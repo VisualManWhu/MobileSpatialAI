@@ -64,6 +64,19 @@ class JobActive(Exception):
     """delete() while the worker is training/exporting the job (its directory is being written)."""
 
 
+class UploadInProgress(Exception):
+    """rerun() of an id that is still a resumable upload (no capture.zip yet)."""
+
+
+MODES = ("fast", "precise")
+
+
+def _check_mode(mode: str) -> str:
+    if mode not in MODES:
+        raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
+    return mode
+
+
 @dataclass(frozen=True)
 class ResumableInfo:
     upload_id: str
@@ -72,9 +85,7 @@ class ResumableInfo:
     received: int
     created_at: float
     updated_at: float
-
-
-MODES = ("fast", "precise")
+    mode: str = "fast"  # absent in upload.json written before precise mode
 
 
 @dataclass(frozen=True)
@@ -90,12 +101,13 @@ class JobStatus:
 class Upload:
     """A capture.zip being written. write() enforces the store's size cap as bytes arrive."""
 
-    def __init__(self, store: JobStore):
+    def __init__(self, store: JobStore, mode: str = "fast"):
         self._store = store
         self.job_id = uuid.uuid4().hex[:12]
         self.dir = store.job_dir(self.job_id)
         self.dir.mkdir()
         self.size = 0
+        self.mode = _check_mode(mode)  # may be changed before commit() (multipart field order)
         self._f = open(self.dir / "capture.zip", "wb")
 
     def write(self, data: bytes) -> None:
@@ -113,7 +125,7 @@ class Upload:
         """Finish the upload, write status queued and enqueue the job."""
         try:
             self._f.close()
-            self._store._commit(self.job_id, self.size)
+            self._store._commit(self.job_id, self.size, _check_mode(self.mode))
         except BaseException:
             self.abort()
             raise
@@ -133,13 +145,13 @@ class JobStore:
     def job_dir(self, job_id: str) -> Path:
         return self.jobs_dir / job_id
 
-    def begin_upload(self) -> Upload:
+    def begin_upload(self, mode: str = "fast") -> Upload:
         """Open a new job's capture.zip for incremental writing; finish with commit() or abort()."""
-        return Upload(self)
+        return Upload(self, mode)
 
-    def create(self, stream: BinaryIO) -> str:
-        """Copy a file-like to a new job in chunks, then enqueue. Raises UploadTooLargeError."""
-        up = self.begin_upload()
+    def create(self, stream: BinaryIO, mode: str = "fast") -> str:
+        """Copy a file-like to a new job in chunks, then enqueue. Raises UploadTooLargeError, ValueError."""
+        up = self.begin_upload(mode)
         try:
             while chunk := stream.read(CHUNK):
                 up.write(chunk)
@@ -152,6 +164,37 @@ class JobStore:
         self._write(JobStatus(job_id, "queued", 0.0, "排队中", time.time(), mode))
         self.log(job_id, f"created ({size} bytes), state=queued, mode={mode}")
         self.queue.put(job_id)
+
+    def rerun(self, job_id: str, mode: str) -> str:
+        """Queue a new job over an existing job's capture.zip (hard-linked, copied if that fails).
+
+        The source only needs its capture.zip, so it may itself still be training. Raises
+        ValueError (bad mode), KeyError (unknown id or no capture.zip) or UploadInProgress (the id is
+        a resumable upload that has not been finished).
+        """
+        _check_mode(mode)
+        if not _JOB_ID.fullmatch(job_id):
+            raise KeyError(job_id)
+        src_dir = self.job_dir(job_id)
+        src = src_dir / "capture.zip"
+        if not src.is_file():
+            if (src_dir / "upload.json").is_file() and self.get(job_id) is None:
+                raise UploadInProgress(job_id)
+            raise KeyError(job_id)
+        new_id = uuid.uuid4().hex[:12]
+        d = self.job_dir(new_id)
+        d.mkdir()
+        try:
+            try:
+                os.link(src, d / "capture.zip")
+            except OSError:  # cross-device, FS without hard links, ...
+                shutil.copyfile(src, d / "capture.zip")
+            self.log(new_id, f"created from {job_id} (rerun, mode={mode})")
+            self._commit(new_id, (d / "capture.zip").stat().st_size, mode)
+        except BaseException:
+            shutil.rmtree(d, ignore_errors=True)
+            raise
+        return new_id
 
     def get(self, job_id: str) -> JobStatus | None:
         if not _JOB_ID.fullmatch(job_id):
@@ -220,12 +263,16 @@ class JobStore:
 
     # --- resumable uploads ---
 
-    def begin_resumable(self, size: int, sha256: str) -> ResumableInfo:
-        """Register an upload of `size` bytes with the given SHA-256; bytes arrive via append_resumable."""
+    def begin_resumable(self, size: int, sha256: str, mode: str = "fast") -> ResumableInfo:
+        """Register an upload of `size` bytes with the given SHA-256; bytes arrive via append_resumable.
+
+        `mode` is the reconstruction mode the finished job will run with (persisted in upload.json).
+        """
         if size <= 0:
             raise ValueError("size must be positive")
         if not _SHA256.fullmatch(sha256):
             raise ValueError("sha256 must be 64 lowercase hex digits")
+        _check_mode(mode)
         if size > self.max_upload_bytes:
             raise UploadTooLargeError(self.max_upload_bytes)
         upload_id = uuid.uuid4().hex[:12]
@@ -233,7 +280,7 @@ class JobStore:
         d.mkdir()
         (d / "capture.zip.part").touch()
         now = time.time()
-        info = ResumableInfo(upload_id, size, sha256, 0, now, now)
+        info = ResumableInfo(upload_id, size, sha256, 0, now, now, mode)
         self._write_upload_meta(info)
         return info
 
@@ -323,7 +370,7 @@ class JobStore:
                 raise ChecksumMismatch()
             os.replace(part, d / "capture.zip")
             (d / "upload.json").unlink(missing_ok=True)
-            self._commit(upload_id, info.size)
+            self._commit(upload_id, info.size, info.mode)
         return upload_id
 
     def sweep_resumable(self, now: float | None = None, max_age_s: float = RESUMABLE_MAX_AGE_S) -> int:

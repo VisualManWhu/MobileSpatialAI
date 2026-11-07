@@ -1,8 +1,12 @@
 # 服务端 API（前缀 `/api/v1`）
 
 **状态页**：浏览器打开 `http://<服务端地址>/`（不带 `/api/v1`，例如笔记本上 `http://127.0.0.1:8765/`），
-列出所有任务的状态、进度、说明、创建时间、拍摄包大小，完成的任务可直接下载 `scene.splat`，每 5 秒自动刷新。页面没有删除按钮；电脑上删任务：
+列出所有任务的状态、模式（快速 / 高精）、进度、说明、创建时间、拍摄包大小，完成的任务可直接下载 `scene.splat`，每 5 秒自动刷新。页面没有删除按钮；电脑上删任务：
 `curl -X DELETE http://localhost:8765/api/v1/jobs/<id>`。
+
+**重建模式 `mode`**：`"fast"`（默认，直接用 ARCore 位姿训练）或 `"precise"`（先用 COLMAP 优化位姿再训练，
+见 `docs/superpowers/specs/2026-11-05-recon3d-precise-mode-design.md`）。上传时指定（`POST /uploads` / `POST /jobs`），
+或对已有任务用 `POST /jobs/{id}/rerun` 换模式重算。所有返回任务的接口都带 `mode` 字段；`mode` 不是这两个值 → `422`。
 
 ## GET /health
 
@@ -14,13 +18,13 @@
 
 ## POST /jobs（旧接口：命令行 / 测试用，手机不再使用）
 
-multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）。
+multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）；可选文本字段 `mode`（`fast` | `precise`，默认 `fast`）。
 
 响应 `201`：`{"job_id":"3f9c0a1b2d4e"}`（12 位十六进制）
 
 错误：
 - `413`：拍摄包超过服务端上限（默认 4 GB，`--max-upload-gb` 可调），`{"detail":"上传文件过大，上限 4 GB"}`
-- `422`：缺少 `capture` 字段，或请求不是 `multipart/form-data`
+- `422`：缺少 `capture` 字段，或请求不是 `multipart/form-data`；`mode` 非法：`{"detail":"mode 只能是 fast 或 precise"}`
 - `400`：上传不完整或 multipart 格式错误
 
 上传按流式解析直接写入磁盘；无 `Content-Length`（分块传输）时同样在超过上限的瞬间返回 413。
@@ -31,23 +35,36 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
 
 ```json
 {"jobs":[{"job_id":"3f9c0a1b2d4e","state":"done","progress":1.0,"message":"完成",
-          "created_at":1793628538.96,"capture_bytes":71075878,"has_scene":true}]}
+          "created_at":1793628538.96,"capture_bytes":71075878,"has_scene":true,"mode":"fast"}]}
 ```
 
 正在接收的断点续传上传排在最前面，`state` 为 `uploading`，`progress` = 已收/总大小，
-`message` 为 `已收到 n / size 字节`，`capture_bytes` 是声明的总大小。finish 后变成普通任务。
+`message` 为 `已收到 n / size 字节`，`capture_bytes` 是声明的总大小，`mode` 是 `POST /uploads` 时声明的模式。finish 后变成普通任务。
 
 ## GET /jobs/{id}
 
 ```json
-{"job_id":"3f9c0a1b2d4e","state":"training","progress":0.42,"message":"训练中"}
+{"job_id":"3f9c0a1b2d4e","state":"training","progress":0.42,"message":"训练中","mode":"fast"}
 ```
 
 - `state`: `queued` | `training` | `exporting` | `done` | `failed`
-- `progress`: 0..1（训练 0→0.9，导出 0.9→1.0）
+- `progress`: 0..1。快速：训练 0→0.9，导出 0.9→1.0。高精：位姿优化 0→0.3，训练 0.3→0.9，导出 0.9→1.0
 - `message`: 中文状态说明；失败时为错误原因（如"显存不足，请降低分辨率或改用服务器"、"服务重启，任务中断，请重新上传"）。
+  高精模式位姿阶段 `state` 仍为 `training`，`message` 依次为 `位姿优化 (特征提取)` / `位姿优化 (特征匹配)` / `位姿优化 (全局优化)`；
+  位姿优化失败时自动按快速模式重建，完成后 `message` 为 `完成（高精位姿失败，已按快速模式重建）`，原因在服务端 `log.txt`。
+- `mode`: `fast` | `precise`（老任务的 status.json 没有该字段时按 `fast`）。
 
 任务不存在：`404`，`{"detail":"任务不存在"}`。
+
+## POST /jobs/{id}/rerun
+
+对已有任务的拍摄包换模式重算（手机端"改用高精重算 / 改用快速重算"）。请求 JSON：`{"mode":"precise"}`。
+新任务目录里的 `capture.zip` 是源任务文件的硬链接（不占额外磁盘；文件系统不支持时复制），源任务不变、可同时在训练。
+
+- 成功：`201`，`{"job_id":"<新任务 id>"}`，新任务 `queued`
+- 源任务不存在 / 没有拍摄包：`404`，`{"detail":"任务不存在"}`
+- id 是还没 finish 的断点续传上传：`409`，`{"detail":"上传未完成"}`
+- `mode` 非法：`422`
 
 ## GET /jobs/{id}/scene.splat
 
@@ -74,11 +91,11 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
 
 ### POST /uploads
 
-请求 JSON：`{"size": 123456789, "sha256": "<64 位十六进制>"}`。
+请求 JSON：`{"size": 123456789, "sha256": "<64 位十六进制>", "mode": "fast"}`（`mode` 可省，默认 `fast`）。
 响应 `201`：`{"upload_id":"3f9c0a1b2d4e","received":0}`。
 
 - `413`：`size` 超过上限，`{"detail":"上传文件过大，上限 4 GB"}`
-- `422`：`size` ≤ 0 或 `sha256` 格式不对
+- `422`：`size` ≤ 0、`sha256` 格式不对，或 `mode` 不是 `fast` / `precise`
 
 每次调用先清理 24 小时无活动的未完成上传。
 

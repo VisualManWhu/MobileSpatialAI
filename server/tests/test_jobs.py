@@ -16,6 +16,7 @@ from recon3d.jobs.store import (
     JobStore,
     OffsetMismatch,
     UploadBusy,
+    UploadInProgress,
     UploadTooLargeError,
 )
 from recon3d.jobs.worker import Worker
@@ -472,3 +473,62 @@ def test_worker_default_done_message_when_pipeline_returns_none(store, make_work
     w.start()
     wait_until(lambda: store.get(j).state == "done")
     assert store.get(j).message == "完成"
+
+
+def test_create_and_resumable_store_mode(tmp_path):
+    s = JobStore(tmp_path / "d")
+    j = s.create(io.BytesIO(b"x"), mode="precise")
+    assert s.get(j).mode == "precise"
+    data = b"abc"
+    info = s.begin_resumable(len(data), hashlib.sha256(data).hexdigest(), mode="precise")
+    assert s.resumable(info.upload_id).mode == "precise"
+    s.append_resumable(info.upload_id, 0, [data])
+    assert s.get(s.finish_resumable(info.upload_id)).mode == "precise"
+    with pytest.raises(ValueError):
+        s.create(io.BytesIO(b"x"), mode="turbo")
+
+
+def test_resumable_mode_defaults_to_fast_for_old_upload_json(tmp_path):
+    s = JobStore(tmp_path / "d")
+    info = s.begin_resumable(3, "0" * 64)
+    meta = s.job_dir(info.upload_id) / "upload.json"
+    raw = json.loads(meta.read_text(encoding="utf-8"))
+    raw.pop("mode")
+    meta.write_text(json.dumps(raw), encoding="utf-8")
+    assert s.resumable(info.upload_id).mode == "fast"
+
+
+def test_rerun_hardlinks_capture_and_queues(store):
+    src = store.create(io.BytesIO(b"zipbytes"))
+    new = store.rerun(src, "precise")
+    assert new != src
+    d = store.job_dir(new)
+    assert (d / "capture.zip").read_bytes() == b"zipbytes"
+    assert os.stat(d / "capture.zip").st_ino == os.stat(store.job_dir(src) / "capture.zip").st_ino  # hard link
+    s = store.get(new)
+    assert (s.state, s.mode, s.progress) == ("queued", "precise", 0.0)
+    first = (d / "log.txt").read_text(encoding="utf-8").splitlines()[0]
+    assert first.endswith(f"created from {src} (rerun, mode=precise)")
+    assert store.queue.get_nowait() == src and store.queue.get_nowait() == new
+
+
+def test_rerun_missing_or_uploading_source(tmp_path):
+    s = JobStore(tmp_path / "d")
+    with pytest.raises(KeyError):
+        s.rerun("000000000000", "fast")
+    info = s.begin_resumable(3, "0" * 64)
+    with pytest.raises(UploadInProgress):
+        s.rerun(info.upload_id, "fast")
+    with pytest.raises(ValueError):
+        s.rerun(s.create(io.BytesIO(b"x")), "turbo")
+
+
+def test_rerun_copies_when_link_fails(store, monkeypatch):
+    src = store.create(io.BytesIO(b"zipbytes"))
+
+    def no_link(a, b):
+        raise OSError("EXDEV")
+
+    monkeypatch.setattr(os, "link", no_link)
+    new = store.rerun(src, "fast")
+    assert (store.job_dir(new) / "capture.zip").read_bytes() == b"zipbytes"

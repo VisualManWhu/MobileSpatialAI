@@ -48,7 +48,7 @@ def test_api_upload_status_download(client):
     jid = r.json()["job_id"]
     wait_until(lambda: client.get(f"/api/v1/jobs/{jid}").json()["state"] == "done")
     s = client.get(f"/api/v1/jobs/{jid}").json()
-    assert s == {"job_id": jid, "state": "done", "progress": 1.0, "message": s["message"]}
+    assert s == {"job_id": jid, "state": "done", "progress": 1.0, "message": s["message"], "mode": "fast"}
     r = client.get(f"/api/v1/jobs/{jid}/scene.splat")
     assert r.status_code == 200
     assert r.headers["content-type"] == "application/octet-stream"
@@ -436,3 +436,56 @@ def test_delete_resumable_upload(tmp_path):
         assert c.delete(f"/api/v1/jobs/{uid}").status_code == 204
         assert c.get(f"/api/v1/uploads/{uid}").status_code == 404
         assert all(j["job_id"] != uid for j in c.get("/api/v1/jobs").json()["jobs"])
+
+
+def test_mode_in_upload_create_and_job_bodies(client):
+    data = b"m" * 10
+    r = client.post("/api/v1/uploads", json={"size": 10, "sha256": hashlib.sha256(data).hexdigest(), "mode": "precise"})
+    assert r.status_code == 201
+    uid = r.json()["upload_id"]
+    assert client.get("/api/v1/jobs").json()["jobs"][0]["mode"] == "precise"
+    _put(client, uid, 0, data)
+    client.post(f"/api/v1/uploads/{uid}/finish")
+    wait_until(lambda: client.get(f"/api/v1/jobs/{uid}").json()["state"] == "done")
+    assert client.get(f"/api/v1/jobs/{uid}").json()["mode"] == "precise"
+    jid = client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    assert client.get(f"/api/v1/jobs/{jid}").json()["mode"] == "fast"  # default
+    jid2 = client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}, data={"mode": "precise"}).json()["job_id"]
+    assert client.get(f"/api/v1/jobs/{jid2}").json()["mode"] == "precise"
+    assert all("mode" in j for j in client.get("/api/v1/jobs").json()["jobs"])
+
+
+def test_bad_mode_is_422(client):
+    assert client.post("/api/v1/uploads", json={"size": 1, "sha256": "0" * 64, "mode": "turbo"}).status_code == 422
+    assert client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}, data={"mode": "turbo"}).status_code == 422
+    jid = client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    assert client.post(f"/api/v1/jobs/{jid}/rerun", json={"mode": "turbo"}).status_code == 422
+    jobs = client.get("/api/v1/jobs").json()["jobs"]
+    assert [j["job_id"] for j in jobs] == [jid]  # nothing else created
+
+
+def test_rerun_endpoint(client):
+    jid = client.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    wait_until(lambda: client.get(f"/api/v1/jobs/{jid}").json()["state"] == "done")
+    r = client.post(f"/api/v1/jobs/{jid}/rerun", json={"mode": "precise"})
+    assert r.status_code == 201
+    new = r.json()["job_id"]
+    wait_until(lambda: client.get(f"/api/v1/jobs/{new}").json()["state"] == "done")
+    assert client.get(f"/api/v1/jobs/{new}").json()["mode"] == "precise"
+    r = client.post("/api/v1/jobs/000000000000/rerun", json={"mode": "fast"})
+    assert r.status_code == 404 and r.json() == {"detail": "任务不存在"}
+    uid = _begin(client, b"abc")
+    r = client.post(f"/api/v1/jobs/{uid}/rerun", json={"mode": "fast"})
+    assert r.status_code == 409 and r.json() == {"detail": "上传未完成"}
+
+
+def test_rerun_while_source_training_queues(client_slow):
+    jid = client_slow.post("/api/v1/jobs", files={"capture": ("c.zip", b"zip")}).json()["job_id"]
+    wait_until(lambda: client_slow.get(f"/api/v1/jobs/{jid}").json()["state"] == "training")
+    r = client_slow.post(f"/api/v1/jobs/{jid}/rerun", json={"mode": "precise"})
+    assert r.status_code == 201
+    assert client_slow.get(f"/api/v1/jobs/{r.json()['job_id']}").json()["state"] == "queued"
+
+
+def test_status_page_has_mode_column(client):
+    assert "模式" in client.get("/").text

@@ -10,9 +10,12 @@ from fastapi import HTTPException, Request
 from python_multipart.exceptions import MultipartParseError
 from python_multipart.multipart import MultipartParser, parse_options_header
 
-from recon3d.jobs.store import JobStore, Upload, UploadTooLargeError
+from recon3d.jobs.store import MODES, JobStore, Upload, UploadTooLargeError
 
 FIELD = b"capture"
+MODE_FIELD = b"mode"
+MODE_MAX_LEN = 32
+BAD_MODE = "mode 只能是 fast 或 precise"
 # Allowance for multipart boundaries, part headers and small extra fields.
 FORM_OVERHEAD = 64 * 1024
 
@@ -29,7 +32,9 @@ class _CaptureSink:
         self.store = store
         self.upload: Upload | None = None
         self.complete = False
+        self.mode: bytes | None = None  # the optional `mode` text field, in whichever order it came
         self._writing = False
+        self._reading_mode = False
         self._field = b""
         self._value = b""
         self._headers: dict[bytes, bytes] = {}
@@ -65,15 +70,21 @@ class _CaptureSink:
         if is_capture and self.upload is None:
             self.upload = self.store.begin_upload()
             self._writing = True
+        elif disp == b"form-data" and opts.get(b"name") == MODE_FIELD and b"filename" not in opts:
+            self.mode = b""
+            self._reading_mode = True
 
     def _part_data(self, data: bytes, start: int, end: int) -> None:
         if self._writing:
             self.upload.write(data[start:end])  # raises UploadTooLargeError past the cap
+        elif self._reading_mode and len(self.mode) <= MODE_MAX_LEN:
+            self.mode += data[start:end]
 
     def _part_end(self) -> None:
         if self._writing:
             self._writing = False
             self.complete = True
+        self._reading_mode = False
 
 
 async def receive_capture(request: Request, store: JobStore) -> str:
@@ -99,6 +110,11 @@ async def receive_capture(request: Request, store: JobStore) -> str:
             raise HTTPException(422, "缺少 capture 字段（拍摄包 zip）")
         if not sink.complete:
             raise HTTPException(400, "上传不完整")
+        if sink.mode is not None:
+            mode = sink.mode.decode("utf-8", "replace").strip()
+            if mode not in MODES:
+                raise HTTPException(422, BAD_MODE)
+            sink.upload.mode = mode
         upload, sink.upload = sink.upload, None
         return await to_thread.run_sync(upload.commit)
     except UploadTooLargeError:
