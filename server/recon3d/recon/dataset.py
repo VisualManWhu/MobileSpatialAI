@@ -45,22 +45,38 @@ class TrainingSet:
     depth_c2w: list[torch.Tensor | None] = field(default_factory=list)
 
 
-def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> TrainingSet:
+def build_training_set(
+    cap: Capture, profile: Profile, device: str = "cpu", c2w_override: np.ndarray | None = None
+) -> TrainingSet:
+    """Load images/depths/poses for training.
+
+    c2w_override: optional [N,4,4] OpenCV camera-to-world poses (e.g. precise mode)
+    replacing the ARCore ones. Depth poses move with the same rigid correction as
+    their frame, so depth stays attached to the (corrected) camera.
+    """
     m = cap.manifest
+    if c2w_override is not None:
+        c2w_override = np.asarray(c2w_override, dtype=np.float64)
+        if c2w_override.shape != (len(cap.frames), 4, 4):
+            raise ValueError(
+                f"c2w_override must have shape ({len(cap.frames)}, 4, 4), got {c2w_override.shape}"
+            )
     scale = min(1.0, profile.max_image_side / max(m.image_width, m.image_height))
     w = max(1, round(m.image_width * scale))
     h = max(1, round(m.image_height * scale))
     sx, sy = w / m.image_width, h / m.image_height
 
     images, Ks, poses, depths, depth_Ks, confs, depth_c2ws = [], [], [], [], [], [], []
-    for fr in cap.frames:
+    for i, fr in enumerate(cap.frames):
         with Image.open(cap.root / fr.image) as im:
             im = im.convert("RGB")
             if im.size != (w, h):
                 im = im.resize((w, h), Image.LANCZOS)
             images.append(np.asarray(im, dtype=np.float32) / 255.0)
         Ks.append([[fr.fx * sx, 0, fr.cx * sx], [0, fr.fy * sy, fr.cy * sy], [0, 0, 1]])
-        poses.append(gl_to_cv_c2w(fr.pose))
+        arcore = gl_to_cv_c2w(fr.pose)
+        pose = c2w_override[i] if c2w_override is not None else arcore
+        poses.append(pose)
         if fr.depth is None:
             depths.append(None)
             depth_Ks.append(None)
@@ -106,10 +122,13 @@ def build_training_set(cap: Capture, profile: Profile, device: str = "cpu") -> T
             depth_Ks.append(None)
         depths.append(torch.from_numpy(arr).to(device))
         confs.append(torch.from_numpy(depth_confidence(arr, conf_u8)).to(device))
-        depth_c2ws.append(
-            None if fr.depth_pose is None
-            else torch.tensor(gl_to_cv_c2w(fr.depth_pose), dtype=torch.float32, device=device)
-        )
+        if fr.depth_pose is None:
+            depth_c2ws.append(None)
+        else:
+            depth_c2w = gl_to_cv_c2w(fr.depth_pose)
+            if c2w_override is not None:
+                depth_c2w = pose @ np.linalg.inv(arcore) @ depth_c2w
+            depth_c2ws.append(torch.tensor(depth_c2w, dtype=torch.float32, device=device))
 
     return TrainingSet(
         images=torch.from_numpy(np.stack(images)).to(device),

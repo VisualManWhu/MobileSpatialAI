@@ -108,3 +108,27 @@ def test_conf_size_mismatch_skips_depth(tmp_path, caplog):
     ts = build_training_set(load_capture(z, tmp_path / "w"), PROFILES["laptop"])
     assert ts.depths[0] is None and ts.confs[0] is None
     assert "confidence" in caplog.text
+
+
+def test_c2w_override_replaces_poses_and_corrects_depth_pose(tmp_path):
+    dp = [1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0.3, 0.0, 0.05, 1]
+    z = make_capture(tmp_path, n_frames=3, format_version=2, depth_poses=[dp, None, dp], with_depth=True)
+    cap = load_capture(z, tmp_path / "w")
+    base = build_training_set(cap, PROFILES["laptop"])
+    override = base.c2w.numpy().astype(np.float64).copy()
+    shift = np.eye(4)
+    shift[:3, 3] = [1.0, 2.0, 3.0]
+    override[0] = shift @ override[0]
+    ts = build_training_set(cap, PROFILES["laptop"], c2w_override=override)
+    assert torch.allclose(ts.c2w, torch.tensor(override, dtype=torch.float32))
+    assert ts.depth_c2w[1] is None
+    expected0 = torch.tensor(override[0], dtype=torch.float32) @ torch.linalg.inv(base.c2w[0]) @ base.depth_c2w[0]
+    assert torch.allclose(ts.depth_c2w[0], expected0, atol=1e-5)
+    assert torch.allclose(ts.depth_c2w[2], base.depth_c2w[2], atol=1e-6)  # frame 2 unchanged
+
+
+def test_c2w_override_bad_shape_raises(tmp_path):
+    z = make_capture(tmp_path, n_frames=2)
+    cap = load_capture(z, tmp_path / "w")
+    with pytest.raises(ValueError):
+        build_training_set(cap, PROFILES["laptop"], c2w_override=np.zeros((3, 4, 4)))
