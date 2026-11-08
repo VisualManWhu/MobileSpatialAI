@@ -23,6 +23,9 @@ dependencies = [
     "pycolmap==4.2.1",
     # SAM 2's image processor (objects/detect.py); same CUDA build as torch (see [tool.uv.sources]).
     "torchvision==0.19.1; sys_platform == 'linux'",
+    # Qwen2.5-VL label confirmation (objects/vlm.py): device_map loading, 4-bit on the laptop profile.
+    "accelerate>=0.33",
+    "bitsandbytes>=0.43; sys_platform == 'linux'",
 ]
 
 [project.scripts]
