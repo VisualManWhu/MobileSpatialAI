@@ -1,63 +1,65 @@
 import numpy as np
 from PIL import Image
 
-from recon3d.objects.assign import ObjectMasks, assign_gaussians
+from recon3d.objects.assign import assign_by_voxels, assign_structure
+from recon3d.objects.segments import VOXEL_M, Segment
+from recon3d.objects.structure import Room, Wall
 from recon3d.objects.thumbs import crop_thumbnail
 
-W, H = 64, 48
-K = np.array([[60.0, 0, 32], [0, 60.0, 24], [0, 0, 1]])
-cam = np.eye(4)  # OpenCV camera at origin looking +Z
+
+def block(x0, y0, z0, n, frames=(0, 1, 2, 3, 4)):
+    g = np.stack(np.mgrid[0:n, 0:n, 0:n], -1).reshape(-1, 3) + np.array([x0, y0, z0])
+    lo = g.min(0) * VOXEL_M
+    hi = (g.max(0) + 1) * VOXEL_M
+    size = float(n * VOXEL_M)
+    return Segment([1], list(frames), g, lo, hi, (size, size, size), {}, [])
 
 
-def frame_with_object(frame, depth_m, mask_box, obj_id=1):
-    depth = np.full((H, W), depth_m, dtype=np.float32)
-    mask = np.zeros((H, W), bool)
-    x0, y0, x1, y1 = mask_box
-    mask[y0:y1, x0:x1] = True
-    return depth, ObjectMasks(frame, obj_id, mask)
-
-
-def test_gaussian_inside_mask_and_at_depth_in_two_frames_gets_the_object():
-    pos = np.array(
+def test_voxel_hits_assign_smallest_object_and_respect_the_one_voxel_halo():
+    big = block(0, 0, 0, 20)  # 0.4 m cube
+    small = block(5, 5, 5, 4)  # 8 cm cube inside it
+    positions = np.array(
         [
-            [0.0, 0.0, 2.0],  # projects to (32,24), depth 2 -> inside mask, right depth
-            [0.0, 0.0, 3.0],  # same pixel, 1 m behind the surface -> depth mismatch
-            [1.5, 0.0, 2.0],  # projects to x=77 -> off image
+            [0.11, 0.11, 0.11],  # inside small -> small (id 2)
+            [0.35, 0.35, 0.35],  # inside big only -> big (id 1)
+            [0.41, 0.2, 0.2],  # 1 cm past big's face: within the one-voxel (2 cm) halo -> big
+            [0.47, 0.2, 0.2],  # 7 cm past: nothing
+            [5.0, 5.0, 5.0],  # far away: nothing
         ]
     )
-    d0, m0 = frame_with_object(0, 2.0, (20, 12, 44, 36))
-    d1, m1 = frame_with_object(1, 2.0, (20, 12, 44, 36))
-    ids = assign_gaussians(
-        pos, np.stack([cam, cam]), np.stack([K, K]), [d0, d1], [m0, m1],
-        bbox_min=np.array([[-1, -1, 1.5]]), bbox_max=np.array([[1, 1, 2.5]]),
+    ids = assign_by_voxels(positions, [big, small])
+    assert ids.dtype == np.uint16
+    assert ids.tolist() == [2, 1, 1, 0, 0]
+
+
+def test_structure_assignment_fills_only_unassigned_gaussians_in_order():
+    wall = Wall(1, np.array([1.0, 0.0, 0.0]), 2.0, np.array([0.0, 0.0, 1.0]), (-2.0, 2.0, 0.0, 2.6))  # x = -2
+    room = Room(0.0, 2.6, [wall])
+    door = block(-100, 0, 0, 5)  # a slab at x in [-2.0, -1.9], y 0..0.1, z 0..0.1 (stands in for a door's voxels)
+    door.bbox_min = np.array([-2.1, 0.0, -0.5])
+    door.bbox_max = np.array([-1.9, 2.0, 0.5])
+    positions = np.array(
+        [
+            [0.0, 0.02, 0.0],  # on the floor
+            [0.0, 2.58, 0.0],  # on the ceiling
+            [-1.98, 1.5, 1.5],  # on the wall, outside the door's bbox
+            [-1.98, 1.0, 0.0],  # on the wall, inside the door's bbox -> door, not wall
+            [0.0, 1.3, 0.0],  # mid-air: nothing
+            [0.0, 0.02, 0.5],  # on the floor but already assigned to object 7 -> untouched
+        ]
     )
-    assert ids.dtype == np.uint16 and ids.tolist() == [1, 0, 0]
+    ids = np.zeros(len(positions), dtype=np.uint16)
+    ids[5] = 7
+    out, created = assign_structure(positions, room, ids, first_id=10, openings=[(13, door)])
+    # created: floor 10, ceiling 11, wall 12 (openings keep the id they were given)
+    assert created == [10, 11, 12]
+    assert out.tolist() == [10, 11, 12, 13, 0, 7]
 
 
-def test_one_vote_is_not_enough_and_bbox_margin_is_enforced():
-    pos = np.array([[0.0, 0.0, 2.0], [0.0, 0.0, 2.0]])
-    d0, m0 = frame_with_object(0, 2.0, (0, 0, W, H))
-    ids = assign_gaussians(pos, cam[None], K[None], [d0], [m0], np.array([[-1, -1, 1.5]]), np.array([[1, 1, 2.5]]))
-    assert ids.tolist() == [0, 0]
-    d1, m1 = frame_with_object(1, 2.0, (0, 0, W, H))
-    tight = assign_gaussians(
-        pos, np.stack([cam, cam]), np.stack([K, K]), [d0, d1], [m0, m1],
-        np.array([[0.5, 0.5, 1.5]]), np.array([[1, 1, 2.5]]),  # object box excludes x=0 (margin 0.1)
-    )
-    assert tight.tolist() == [0, 0]
-
-
-def test_votes_pick_the_object_with_most_views():
-    pos = np.array([[0.0, 0.0, 2.0]])
-    depths, masks = [], []
-    for f in range(5):
-        depths.append(np.full((H, W), 2.0, np.float32))
-        masks.append(ObjectMasks(f, 2 if f < 3 else 1, np.ones((H, W), bool)))
-    ids = assign_gaussians(
-        pos, np.stack([cam] * 5), np.stack([K] * 5), depths, masks,
-        np.array([[-1, -1, 1.5]] * 2), np.array([[1, 1, 2.5]] * 2),
-    )
-    assert ids.tolist() == [2]
+def test_structure_assignment_without_floor_or_walls():
+    positions = np.array([[0.0, 0.0, 0.0]])
+    out, created = assign_structure(positions, Room(None, None, []), np.zeros(1, np.uint16), first_id=1, openings=[])
+    assert created == [] and out.tolist() == [0]
 
 
 def test_crop_thumbnail_pads_and_limits_long_side():
