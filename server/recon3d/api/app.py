@@ -117,6 +117,7 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
                 "has_scene": s.state == "done" and (d / "scene.splat").is_file(),
                 "mode": s.mode,
                 "objects": asdict(s.objects_status),
+                "capture_id": s.capture_id,
             })
         return {"jobs": out}
 
@@ -130,6 +131,7 @@ def create_app(store: JobStore, worker: Worker, profile: Profile) -> FastAPI:
             "message": s.message,
             "mode": s.mode,
             "objects": asdict(s.objects_status),
+            "capture_id": s.capture_id,
         }
 
     @api.post("/jobs/{job_id}/objects", status_code=202)

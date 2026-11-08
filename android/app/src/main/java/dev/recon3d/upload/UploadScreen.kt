@@ -412,6 +412,9 @@ fun captureStatusText(record: CaptureRecord): String {
     }
 }
 
+/** `任务 <server job id>` once the capture has a job on the server (matches the server's status page), else null. */
+fun captureJobIdText(record: CaptureRecord): String? = record.jobId?.let { "任务 $it" }
+
 /** ` · 高精` for precise-mode records, empty for fast ones. */
 private fun modeSuffix(record: CaptureRecord): String = if (record.mode == MODE_PRECISE) MSG_PRECISE_SUFFIX else ""
 
@@ -488,6 +491,7 @@ fun CaptureRow(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Column(Modifier.weight(1f)) {
                     Text(record.id, style = MaterialTheme.typography.titleSmall)
+                    captureJobIdText(record)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
                     Text(captureStatusText(record), style = MaterialTheme.typography.bodyMedium)
                 }
                 Box {

@@ -440,6 +440,36 @@ def test_delete_queued_job_is_skipped_by_worker(store, make_worker):
     assert ran == [j2] and not store.job_dir(j1).exists()
 
 
+def _zip_with_manifest(capture_id: str) -> bytes:
+    import io as _io
+    import zipfile
+
+    buf = _io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("manifest.json", json.dumps({"capture_id": capture_id, "room_id": "r"}))
+    return buf.getvalue()
+
+
+def test_capture_id_read_from_manifest_on_create(store):
+    j = store.create(io.BytesIO(_zip_with_manifest("cap-20261107-120000-000")))
+    assert store.get(j).capture_id == "cap-20261107-120000-000"
+    assert store.get(store.rerun(j, "precise")).capture_id == "cap-20261107-120000-000"
+
+
+def test_capture_id_none_for_unreadable_zip(store):
+    j = store.create(io.BytesIO(b"x"))
+    assert store.get(j).capture_id is None
+
+
+def test_capture_id_backfilled_for_old_status_json(store):
+    j = store.create(io.BytesIO(_zip_with_manifest("cap-old")))
+    d = store.job_dir(j)
+    raw = json.loads((d / "status.json").read_text(encoding="utf-8"))
+    raw.pop("capture_id")
+    (d / "status.json").write_text(json.dumps(raw), encoding="utf-8")
+    assert store.get(j).capture_id == "cap-old"
+
+
 def test_status_mode_defaults_to_fast_for_old_status_json(store):
     j = store.create(io.BytesIO(b"x"))
     d = store.job_dir(j)

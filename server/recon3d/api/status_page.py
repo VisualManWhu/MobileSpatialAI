@@ -28,7 +28,7 @@ HTML = """<!doctype html>
 <h1>Recon3D 任务</h1>
 <div id="meta">加载中…</div>
 <table id="jobs" hidden>
-  <thead><tr><th>任务 ID</th><th>状态</th><th>模式</th><th>进度</th><th>说明</th><th>创建时间</th><th>拍摄包</th><th>结果</th><th>物体</th></tr></thead>
+  <thead><tr><th>任务 ID</th><th>拍摄</th><th>状态</th><th>模式</th><th>进度</th><th>说明</th><th>创建时间</th><th>拍摄包</th><th>结果</th><th>物体</th></tr></thead>
   <tbody></tbody>
 </table>
 <div id="empty" hidden>还没有任务。手机上传拍摄包后会出现在这里。</div>
@@ -73,6 +73,7 @@ async function refresh() {
       : "";
     return `<tr class="${esc(j.state)}">
       <td><code>${esc(j.job_id)}</code></td>
+      <td><code>${esc(j.capture_id ?? "")}</code></td>
       <td>${esc(STATE[j.state] || j.state)}</td>
       <td>${j.mode === "precise" ? "高精" : "快速"}</td>
       <td><div class="bar"><i style="width:${pct}%"></i></div>${pct}%</td>

@@ -51,6 +51,7 @@ def test_api_upload_status_download(client):
     assert s == {
         "job_id": jid, "state": "done", "progress": 1.0, "message": s["message"], "mode": "fast",
         "objects": {"state": "none", "progress": 0.0, "message": "", "count": 0},
+        "capture_id": None,
     }
     r = client.get(f"/api/v1/jobs/{jid}/scene.splat")
     assert r.status_code == 200
@@ -492,6 +493,15 @@ def test_rerun_while_source_training_queues(client_slow):
 
 def test_status_page_has_mode_column(client):
     assert "模式" in client.get("/").text
+
+
+def test_jobs_carry_capture_id_and_status_page_shows_it(client):
+    from tests.test_jobs import _zip_with_manifest
+
+    jid = client.post("/api/v1/jobs", files={"capture": ("c.zip", _zip_with_manifest("cap-20261107-120000-000"))}).json()["job_id"]
+    assert client.get(f"/api/v1/jobs/{jid}").json()["capture_id"] == "cap-20261107-120000-000"
+    assert client.get("/api/v1/jobs").json()["jobs"][0]["capture_id"] == "cap-20261107-120000-000"
+    assert "<th>拍摄</th>" in client.get("/").text
 
 
 # --- objects work (phase 2) ---

@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import uuid
+import zipfile
 from collections.abc import Iterable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -80,6 +81,17 @@ class UploadInProgress(Exception):
 MODES = ("fast", "precise")
 
 
+def capture_id_of(zip_path: Path) -> str | None:
+    """`capture_id` from the manifest inside capture.zip, or None if anything about it is unreadable."""
+    try:
+        with zipfile.ZipFile(zip_path) as z:
+            manifest = json.loads(z.read("manifest.json").decode("utf-8"))
+        cid = manifest.get("capture_id")
+        return cid if isinstance(cid, str) and cid else None
+    except Exception:
+        return None
+
+
 def _check_mode(mode: str) -> str:
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
@@ -116,6 +128,9 @@ class JobStatus:
     created_at: float
     mode: str = "fast"  # "fast" | "precise"; absent in status.json written before precise mode
     objects: dict = field(default_factory=lambda: asdict(ObjectsStatus()))  # absent before phase 2
+    # The phone's capture id from capture.zip's manifest.json, so the status page and the phone's
+    # list can be matched up; None when the zip has no readable manifest.
+    capture_id: str | None = None
 
     @property
     def objects_status(self) -> ObjectsStatus:
@@ -186,8 +201,9 @@ class JobStore:
         return up.commit()
 
     def _commit(self, job_id: str, size: int, mode: str = "fast") -> None:
-        self._write(JobStatus(job_id, "queued", 0.0, "排队中", time.time(), mode))
-        self.log(job_id, f"created ({size} bytes), state=queued, mode={mode}")
+        capture_id = capture_id_of(self.job_dir(job_id) / "capture.zip")
+        self._write(JobStatus(job_id, "queued", 0.0, "排队中", time.time(), mode, capture_id=capture_id))
+        self.log(job_id, f"created ({size} bytes), state=queued, mode={mode}, capture_id={capture_id}")
         self.queue.put(("recon", job_id))
 
     def rerun(self, job_id: str, mode: str) -> str:
@@ -228,6 +244,8 @@ class JobStore:
             raw = json.loads((self.job_dir(job_id) / "status.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return None
+        if "capture_id" not in raw:  # status.json written before the field existed
+            raw["capture_id"] = capture_id_of(self.job_dir(job_id) / "capture.zip")
         return JobStatus(**raw)
 
     def list(self) -> list[JobStatus]:

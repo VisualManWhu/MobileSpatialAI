@@ -149,6 +149,12 @@ class UploadViewModelTest {
         assertTrue(logged.any { it.message == "internal detail" })
     }
 
+    @Test fun jobIdLineShowsTheServerJobId() {
+        val r = CaptureRecord(id = "cap-1", zipPath = "")
+        assertNull(captureJobIdText(r))
+        assertEquals("任务 40a80bd6c17f", captureJobIdText(r.copy(jobId = "40a80bd6c17f")))
+    }
+
     @Test fun retryButtonLabelDependsOnJobId() {
         val r = CaptureRecord(id = "c", zipPath = "z", state = "failed")
         assertEquals("重新上传", retryButtonLabel(r))
