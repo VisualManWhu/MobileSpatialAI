@@ -26,7 +26,7 @@ def test_detector_returns_vocab_labels_and_full_size_masks(detector):
     d.arc([380, 240, 440, 360], 270, 90, fill=(200, 40, 40), width=14)  # handle
     out = detector.detect(img)
     assert out, "something should be detected on the drawing"
-    vocab = {en for en, _ in VOCAB}
+    vocab = {e.en for e in VOCAB}
     assert all(isinstance(o, FrameDetection) and o.label in vocab for o in out)
     assert all(o.mask.shape == (480, 640) and o.mask.dtype == bool for o in out)
     best = max(out, key=lambda o: o.score)

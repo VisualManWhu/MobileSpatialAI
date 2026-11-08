@@ -7,16 +7,49 @@ import pytest
 from recon3d.objects import table, vocab
 
 
-def test_vocab_has_40_entries_with_chinese_labels():
-    assert len(vocab.VOCAB) == 40
+V1 = {"cup", "bottle", "book", "remote control", "chair", "table", "monitor", "laptop", "keyboard",
+      "mouse", "phone", "box", "bag", "lamp", "plant", "whiteboard", "door", "window", "trash can",
+      "pen", "sofa", "bed", "pillow", "shelf", "cabinet", "tv", "speaker", "headphones", "clock",
+      "picture frame", "curtain", "mirror", "fan", "printer", "backpack", "shoes", "towel", "sink",
+      "refrigerator", "microwave"}
+
+
+def test_v1_vocab_is_preserved():
+    assert V1 <= {e.en for e in vocab.VOCAB}
+    assert 55 <= len(vocab.VOCAB) <= 70
     assert vocab.zh_label("cup") == "杯子" and vocab.zh_label("remote control") == "遥控器"
-    assert all(zh and not zh.isascii() for _, zh in vocab.VOCAB)
+    assert all(e.zh and not e.zh.isascii() for e in vocab.VOCAB)
+    assert vocab.zh_label("door") == "门" and vocab.entry("door").level == "structure"
+    assert {e.level for e in vocab.VOCAB} == {"structure", "furniture", "item"}
+    assert len({e.en for e in vocab.VOCAB}) == len(vocab.VOCAB)
+
+
+def test_candidates_use_size_and_support():
+    # a 2.0 m tall, 0.9 m wide thing flush with a wall: door and window pass the size/support gate
+    # (the floor-distance split between them is verify.door_window_ok), phone does not
+    c = {e.en for e in vocab.candidates((0.9, 0.1, 2.0), "wall:1", "structure")}
+    assert {"door", "window"} <= c
+    assert "phone" not in {e.en for e in vocab.candidates((0.9, 0.1, 2.0), "floor", "item")}
+    # a 15 cm flat thing on a table: phone yes, remote yes, monitor no
+    c = {e.en for e in vocab.candidates((0.15, 0.07, 0.01), "on:3", "item")}
+    assert {"phone", "remote control"} <= c and "monitor" not in c
+    # "none" support matches everything that fits the size
+    assert "chair" in {e.en for e in vocab.candidates((0.5, 0.5, 0.9), "none", "furniture")}
+    # by_level partitions the vocab
+    assert sum(len(vocab.by_level(lv)) for lv in ("structure", "furniture", "item")) == len(vocab.VOCAB)
+
+
+def test_every_entry_has_sane_ranges():
+    for e in vocab.VOCAB:
+        assert 0 < e.h_min < e.h_max and 0 < e.l_min < e.l_max and e.supports, e.en
+        assert e.supports <= {"floor", "wall", "ceiling", "on"}, e.en
 
 
 def test_prompt_batches_cover_vocab_in_groups_of_20():
     batches = vocab.prompt_batches()
-    assert len(batches) == 2 and all(b.endswith(".") for b in batches)
-    assert sum(b.count(". ") + 1 for b in batches) == 40
+    n = len(vocab.VOCAB)
+    assert len(batches) == -(-n // 20) and all(b.endswith(".") for b in batches)
+    assert sum(b.count(". ") + 1 for b in batches) == n
 
 
 def test_label_of_maps_detector_phrases_back_to_vocab():
