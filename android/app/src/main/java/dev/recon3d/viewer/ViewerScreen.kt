@@ -274,7 +274,16 @@ private fun ObjectsOverlay(record: CaptureRecord, loaded: Boolean, webView: WebV
         ModalBottomSheet(onDismissRequest = { sheetOpen = false }) {
             val dir = record.objectsPath
             LazyColumn(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-                for (group in t.grouped()) {
+                for (section in t.sections()) {
+                  item {
+                      Text(
+                          section.title,
+                          Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
+                          style = MaterialTheme.typography.titleMedium,
+                          color = MaterialTheme.colorScheme.primary,
+                      )
+                  }
+                  for (group in section.groups) {
                     stickyHeader {
                         Surface(color = MaterialTheme.colorScheme.surface, modifier = Modifier.fillMaxWidth()) {
                             Text(groupTitle(group), Modifier.padding(horizontal = 16.dp, vertical = 8.dp), style = MaterialTheme.typography.titleSmall)
@@ -303,6 +312,7 @@ private fun ObjectsOverlay(record: CaptureRecord, loaded: Boolean, webView: WebV
                             }
                         }
                     }
+                  }
                 }
             }
         }
