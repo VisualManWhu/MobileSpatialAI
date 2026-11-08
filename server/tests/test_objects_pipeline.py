@@ -13,7 +13,7 @@ import recon3d.objects.pipeline as op
 from recon3d.capture.poses import gl_to_cv_c2w
 from recon3d.config import PROFILES
 from recon3d.objects.pipeline import run_objects
-from recon3d.objects.segments import Track
+from recon3d.objects.segments import Track, pack_mask
 from recon3d.recon.export_splat import export_ply, export_splat
 from recon3d.recon.trainer import Splats
 from tests.fixtures.make_capture import make_capture
@@ -113,7 +113,7 @@ class FakeTracker:
                         continue
                     ys, xs = np.nonzero(m)
                     t.frames.append(fi)
-                    t.masks.append(np.packbits(m))
+                    t.masks.append(pack_mask(m))
                     t.boxes.append((xs.min() * sx, ys.min() * sy, (xs.max() + 1) * sx, (ys.max() + 1) * sy))
                 if t.frames:
                     tracks.append(t)
@@ -273,3 +273,32 @@ def test_profiles_carry_objects_models():
     assert srv.objects_detector == "IDEA-Research/grounding-dino-base" and srv.objects_sam == "facebook/sam2.1-hiera-large"
     assert srv.objects_vlm == "Qwen/Qwen2.5-VL-7B-Instruct" and srv.objects_vlm_4bit is False
     assert srv.objects_resident_min_free_gb == 30.0
+
+
+def test_door_voted_slab_failing_geometry_is_dropped_not_degraded(tmp_path, monkeypatch):
+    """Spec §4.1: a door/window candidate that fails the geometric gate is dropped, never relabelled
+    (review finding #4). A slab floating 0.4 m above the floor fails the door gate; the window gate
+    passes, so one structure ask happens; an unsure VLM must end it there — no furniture/item asks."""
+    job = _job(tmp_path)
+    lo, hi = TALL_LO + np.array([0, 0.4, 0]), TALL_HI + np.array([0, 0.4, 0])
+    scene = Scene([(lo, hi)])
+    tracker, vlm = _install(monkeypatch, scene, splits={0: [range(0, N_FRAMES)]}, votes={0: {"door": 3.0, "cabinet": 1.0}}, answers=["不确定", "柜子", "柜子"])
+    run_objects(job, PROFILES["laptop"], lambda p, m: None)
+    j = json.loads((job / "objects" / "objects.json").read_text(encoding="utf-8"))
+    assert len(vlm.prompts) == 1 and "窗" in vlm.prompts[0]
+    assert "cabinet" not in {o["label"] for o in j["objects"]}
+
+
+def test_vlm_asks_are_capped_by_segment_budget(tmp_path, monkeypatch):
+    job = _job(tmp_path)
+    monkeypatch.setattr(op, "MAX_VERIFY_SEGMENTS", 1)
+    scene = Scene([(CHAIR_LO, CHAIR_HI), (PHONE_LO, PHONE_HI)])
+    tracker, vlm = _install(
+        monkeypatch, scene, splits={0: [range(0, N_FRAMES)], 1: [range(0, N_FRAMES)]},
+        votes={0: {"chair": 4.0}, 1: {"phone": 2.0}}, answers=["椅子", "椅子", "手机", "手机"],
+    )
+    run_objects(job, PROFILES["laptop"], lambda p, m: None)
+    j = json.loads((job / "objects" / "objects.json").read_text(encoding="utf-8"))
+    assert len(vlm.prompts) == 2  # only the longest-tracked segment was put to the VLM
+    assert "chair" in {o["label"] for o in j["objects"]} and "phone" not in {o["label"] for o in j["objects"]}
+    assert "budget" in (job / "log.txt").read_text(encoding="utf-8")

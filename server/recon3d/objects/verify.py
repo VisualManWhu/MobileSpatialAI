@@ -25,7 +25,7 @@ _STRIP = " \t\r\n「」『』\"'“”‘’。.!！,，、:：;；"
 
 # harmony rules
 FURNITURE_IOU = 0.3
-ITEM_IN_FURNITURE_FRACTION = 0.5  # of the item's bbox volume inside a furniture bbox (containment, not IoU)
+ITEM_IN_FURNITURE_FRACTION = 0.5  # of the item's voxels shared with a furniture segment (a piece of its surface)
 OUTSIDE_MARGIN_M = 0.3
 WALL_BAND_M = 0.15
 WALL_SLAB_FRACTION = 0.8
@@ -120,18 +120,23 @@ def bbox_iou(a: Segment, b: Segment) -> float:
     return inter / union if union > 0 else 0.0
 
 
-def inside_fraction(a: Segment, b: Segment) -> float:
-    """Fraction of a's bbox volume that lies inside b's bbox."""
-    lo = np.maximum(a.bbox_min, b.bbox_min)
-    hi = np.minimum(a.bbox_max, b.bbox_max)
-    inter = float(np.prod(np.clip(hi - lo, 0, None)))
-    va = float(np.prod(a.bbox_max - a.bbox_min))
-    return inter / va if va > 0 else 0.0
+def _packed(seg: Segment) -> np.ndarray:
+    k = seg.voxels.astype(np.int64) + (1 << 20)
+    return (k[:, 0] << 42) | (k[:, 1] << 21) | k[:, 2]
+
+
+def voxel_overlap_fraction(a: Segment, b: Segment) -> float:
+    """Fraction of a's voxels that b also occupies. A chunk of a table's surface shares the table's
+    voxels; a book on a shelf or a pillow on a sofa sits in the furniture's empty space and shares none,
+    even though its bbox is inside the furniture bbox."""
+    if len(a.voxels) == 0:
+        return 0.0
+    return float(np.isin(_packed(a), _packed(b)).mean())
 
 
 def harmony_filter(verified: list[Verified], room: Room) -> list[Verified]:
     """Spec §4.3 last gate, applied in order: furniture IoU > 0.3 keeps the larger; an item mostly
-    inside a furniture bbox is a part of it; nothing lives outside the walls (two or more walls);
+    whose voxels a furniture segment mostly shares is a piece of it; nothing lives outside the walls it faces (two or more walls);
     a tall wall-flush slab is a door/window or nothing."""
     keep = list(verified)
     # 1. furniture overlap
@@ -149,7 +154,10 @@ def harmony_filter(verified: list[Verified], room: Room) -> list[Verified]:
     keep = [
         v
         for v in keep
-        if not (v.entry.level == "item" and any(inside_fraction(v.seg, f.seg) > ITEM_IN_FURNITURE_FRACTION for f in furniture))
+        if not (
+            v.entry.level == "item"
+            and any(bbox_iou(v.seg, f.seg) > 0 and voxel_overlap_fraction(v.seg, f.seg) > ITEM_IN_FURNITURE_FRACTION for f in furniture)
+        )
     ]
     # 3. outside the walls
     if len(room.walls) >= 2:

@@ -1,7 +1,7 @@
 import numpy as np
 
 from recon3d.objects import structure
-from recon3d.objects.structure import Room, depth_point_cloud, fit_room
+from recon3d.objects.structure import Room, Wall, depth_point_cloud, fit_room
 
 # A 4 x 5 m room, floor y = 0, ceiling y = 2.6; cameras at y = 1.4 inside.
 X0, X1, Z0, Z1, CEIL = -2.0, 2.0, -2.5, 2.5, 2.6
@@ -87,3 +87,35 @@ def test_depth_point_cloud_backprojects():
 
 def test_module_constants():
     assert structure.DEFAULT_INLIER_M == 0.03
+
+
+def test_vertical_fit_never_turns_into_a_horizontal_plane():
+    """A 1.6 m² table top sits below the floor-area threshold; the wall RANSAC must not adopt it after
+    refinement (review finding #5): every wall normal stays horizontal."""
+    pts = box_room()
+    x, z = _grid(-0.6, 0.6, -0.7, 0.7, step=0.03)  # 1.68 m² at y = 0.75
+    pts = np.concatenate([pts, np.stack([x, np.full_like(x, 0.75), z], 1)])
+    room = fit_room(pts, CAMS)
+    assert abs(room.floor_y) < 0.02
+    for w in room.walls:
+        assert abs(w.normal[1]) < 0.05
+
+
+def test_inside_xz_only_counts_walls_the_point_faces():
+    """An L-shaped room: a wall's infinite plane must not condemn points beyond the wall's own extent
+    (review finding #6)."""
+    short = Wall(1, np.array([1.0, 0.0, 0.0]), 0.0, np.array([0.0, 0.0, 1.0]), (0.0, 2.0, 0.0, 2.6))  # x = 0, only for z in [0, 2]
+    far = Wall(2, np.array([-1.0, 0.0, 0.0]), 4.0, np.array([0.0, 0.0, 1.0]), (-3.0, 3.0, 0.0, 2.6))  # x = 4
+    room = Room(0.0, None, [short, far])
+    p = np.array([[-1.0, 1.0, 1.0], [-1.0, 1.0, -2.0], [5.0, 1.0, 0.0]])
+    # behind the short wall within its extent -> out; behind its plane but past its end -> in; behind the far wall -> out
+    assert room.inside_xz(p, 0.3).tolist() == [False, True, False]
+
+
+def test_depth_point_cloud_is_float32_and_dedups_across_frames():
+    h, w = 54, 96
+    depth = np.full((h, w), 2.0, dtype=np.float32)
+    K = np.array([[80.0, 0, w / 2], [0, 80.0, h / 2], [0, 0, 1]])
+    one = depth_point_cloud([depth], np.array([K]), np.array([np.eye(4)]), voxel_m=0.03, stride=1)
+    two = depth_point_cloud([depth, depth], np.array([K, K]), np.array([np.eye(4), np.eye(4)]), voxel_m=0.03, stride=1)
+    assert one.dtype == np.float32 and len(two) == len(one)  # the same frame twice adds no points

@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image
 
 from recon3d.objects.detect import Detector, DownloadError, box_iou
-from recon3d.objects.segments import Track
+from recon3d.objects.segments import Track, pack_mask
 
 log = logging.getLogger(__name__)
 
@@ -117,7 +117,7 @@ class Tracker:
         live: list[_Live] = []
         next_track_id = 1
         session = None
-        session_start = 0
+        fed = 0  # frames fed to the current session: the index the next forward() will get
         full_hw = None
         with torch.inference_mode():
             for fi, path in enumerate(image_paths):
@@ -127,21 +127,25 @@ class Tracker:
                 sx, sy = W / mask_hw[1], H / mask_hw[0]
                 inputs = self._proc(images=img, device=self.device, return_tensors="pt")
                 pixel = inputs.pixel_values[0]
-                local = fi - session_start
                 propose = fi % PROPOSE_EVERY == 0
-                # periodic rebuild (never on a proposal frame): drop dead objects, re-seed the live ones
-                # from their last masks
-                if session is None or (local >= RESET_EVERY and not propose):
+                # periodic rebuild (never on a proposal frame): drop dead objects; re-seed only the tracks
+                # seen in the previous frame (a mask lost for several frames would stick to whatever is
+                # there now), the rest end here.
+                if session is None or (fed >= RESET_EVERY and not propose):
                     session = self._new_session()
-                    session_start = fi
-                    local = 0
-                    seeded = [lv for lv in live if lv.last_mask is not None]
+                    fed = 0
+                    seeded = [lv for lv in live if lv.lost == 0 and lv.last_mask is not None]
+                    for lv in live:
+                        if lv not in seeded and lv.track.frames:
+                            done.append(lv.track)
+                    live = seeded
                     if seeded:
                         self._seed_masks(session, 0, [lv.obj_id for lv in seeded], [lv.last_mask for lv in seeded], full_hw)
                 # proposals
                 proposals = self.detector.detect_boxes(img) if propose else []
                 new_ids: list[int] = []
                 new_boxes: list = []
+                new_live: list[_Live] = []
                 for label, score, box in proposals:
                     matched = None
                     for lv in live:
@@ -153,19 +157,27 @@ class Tracker:
                         continue
                     if any(lv.last_box is not None and box_iou(box, lv.last_box) >= NEW_TRACK_MAX_IOU for lv in live):
                         continue
+                    # a second box of this frame on the same thing (cross-class duplicate the NMS let through)
+                    dup = next((lv for lv, nb in zip(new_live, new_boxes) if box_iou(box, nb) >= NEW_TRACK_MAX_IOU), None)
+                    if dup is not None:
+                        dup.track.votes[label] = dup.track.votes.get(label, 0.0) + score
+                        continue
                     t = Track(next_track_id, [], [], [], {label: score})
                     lv = _Live(t, next_track_id)
                     next_track_id += 1
                     new_ids.append(lv.obj_id)
                     new_boxes.append(box)
+                    new_live.append(lv)
                     live.append(lv)
                 if new_ids:
-                    self._seed_boxes(session, local, new_ids, new_boxes, full_hw)
+                    # seeds refer to the frame the next forward() will add: index `fed`, not the capture position
+                    self._seed_boxes(session, fed, new_ids, new_boxes, full_hw)
                 if not live:
                     if on_frame:
                         on_frame(fi)
                     continue
                 masks = self._step(session, pixel, mask_hw)
+                fed += 1
                 still: list[_Live] = []
                 for lv in live:
                     m = masks.get(lv.obj_id)
@@ -181,7 +193,7 @@ class Tracker:
                     lv.last_mask = m
                     lv.last_box = _mask_box(m, sx, sy)
                     lv.track.frames.append(fi)
-                    lv.track.masks.append(np.packbits(m))
+                    lv.track.masks.append(pack_mask(m))
                     lv.track.boxes.append(lv.last_box)
                     still.append(lv)
                 live = still

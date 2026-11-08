@@ -5,7 +5,10 @@ from recon3d.objects.segments import (
     Segment,
     Track,
     merge_segments,
+    pack_mask,
     support_of,
+    unpack_mask,
+    wall_support,
     track_to_segment,
     voxel_key,
 )
@@ -54,7 +57,7 @@ def box_frames(n=6, lo=LO, hi=HI):
     for c in c2w:
         d, hit = render_box(c, lo, hi)
         depths.append(d)
-        masks.append(np.packbits(hit))
+        masks.append(pack_mask(hit))
     return c2w, depths, masks
 
 
@@ -75,7 +78,7 @@ def test_track_to_segment_keeps_voxels_hit_in_three_frames():
     assert seg.frames == list(range(6)) and seg.track_ids == [1]
     assert 1 <= len(seg.best_views) <= 5 and all(f in range(6) for f, _ in seg.best_views)
     # a frame whose mask covers only empty background adds no voxels
-    bg = np.packbits(np.ones((H, W), bool))
+    bg = pack_mask(np.ones((H, W), bool))
     depth_bg = np.zeros((H, W), np.float32)
     seg2 = track_to_segment(
         track(range(7), masks + [bg]), depths + [depth_bg], np.stack([K] * 7), np.concatenate([c2w, c2w[:1]]), H, W
@@ -149,3 +152,43 @@ def test_support_floor_on_wall_none():
 def test_voxel_key_floors():
     k = voxel_key(np.array([[0.031, -0.001, 0.0]]))
     assert k.tolist() == [[1, -1, 0]]
+
+
+def test_wall_support_ignores_a_desk_under_a_window():
+    """A window sill 5 cm above a desk top would read as on:<desk>; the structure level asks for the
+    wall directly (review finding #11)."""
+    wall = Wall(1, np.array([1.0, 0.0, 0.0]), 2.0, np.array([0.0, 0.0, 1.0]), (-2.0, 2.0, 0.0, 2.6))  # x = -2
+    room = Room(0.0, 2.6, [wall])
+    desk = _plain(cube(-100, 0, -20, 38))  # 0.76 m cube flush with the wall
+    window = _plain(cube(-100, 40, -15, 3)[:, :] + 0)
+    window.voxels = np.stack(np.mgrid[-100:-98, 40:80, -15:15], -1).reshape(-1, 3)  # 4 cm thick, 0.8 m tall, 0.6 wide
+    c = (window.voxels + 0.5) * 0.02
+    window.bbox_min, window.bbox_max = c.min(0), c.max(0)
+    assert support_of(window, room, [desk]) == "on:0"
+    assert wall_support(window, room) == "wall:1"
+    assert wall_support(desk, room) is None  # a 76 cm deep cube is not a wall-flush thing
+
+
+def test_merge_segments_scales_to_hundreds_of_segments():
+    """Real captures yield a few hundred segments; the pairwise merge must stay in seconds (review finding #8)."""
+    import time
+
+    segs = []
+    for i in range(400):
+        base = cube((i % 20) * 30, 0, (i // 20) * 30, 8)  # 0.16 m cubes on a 0.6 m grid, all disjoint
+        segs.append(_plain(base, frames=range(i * 3, i * 3 + 5)))
+    t0 = time.perf_counter()
+    out = merge_segments(segs)
+    assert len(out) == 400
+    assert time.perf_counter() - t0 < 3.0
+
+
+def test_pack_mask_stores_only_the_box_and_roundtrips():
+    """A 540x960 mask of a small object must not cost 65 KB per frame (review finding #10)."""
+    m = np.zeros((540, 960), bool)
+    m[100:140, 300:360] = True
+    pm = pack_mask(m)
+    assert pm.bits.nbytes < 400 and pm.box == (100, 140, 300, 360)
+    assert np.array_equal(unpack_mask(pm, 540, 960), m)
+    empty = pack_mask(np.zeros((540, 960), bool))
+    assert not unpack_mask(empty, 540, 960).any()

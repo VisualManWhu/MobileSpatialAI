@@ -41,13 +41,18 @@ class Room:
         return np.asarray(p, dtype=np.float64) @ wall.normal + wall.d
 
     def inside_xz(self, p: np.ndarray, margin_m: float) -> np.ndarray:
-        """True for points not farther than margin_m behind any wall; all True with fewer than two walls."""
+        """True for points not farther than margin_m behind any wall *they face*: a wall only judges
+        points whose in-plane position falls within its own extent (plus margin), so an L-shaped room
+        or a partition does not condemn the far side of its plane's extension. All True with < 2 walls."""
         p = np.atleast_2d(np.asarray(p, dtype=np.float64))
         if len(self.walls) < 2:
             return np.ones(len(p), dtype=bool)
         ok = np.ones(len(p), dtype=bool)
         for w in self.walls:
-            ok &= self.wall_distance(p, w) >= -margin_m
+            u = p @ w.u
+            u0, u1, _, _ = w.extent
+            faces = (u >= u0 - margin_m) & (u <= u1 + margin_m)
+            ok &= ~faces | (self.wall_distance(p, w) >= -margin_m)
         return ok
 
     def to_json(self) -> dict:
@@ -58,27 +63,33 @@ class Room:
         }
 
 
+def _voxel_dedup(pts: np.ndarray, voxel_m: float) -> np.ndarray:
+    keys = np.floor(pts / voxel_m).astype(np.int64) + (1 << 20)
+    packed = (keys[:, 0] << 42) | (keys[:, 1] << 21) | keys[:, 2]
+    _, first = np.unique(packed, return_index=True)
+    return pts[np.sort(first)]
+
+
 def depth_point_cloud(depths, Ks_small: np.ndarray, c2w_cv: np.ndarray, voxel_m: float = 0.03, stride: int = 4) -> np.ndarray:
-    """World points from rendered depth maps (every stride-th pixel), deduplicated on a voxel grid."""
+    """World points (float32) from rendered depth maps (every stride-th pixel), deduplicated on a voxel
+    grid per frame and once more over all frames, so 1100 frames never hold 30 M raw points at once."""
     out = []
     for depth, K, c2w in zip(depths, Ks_small, c2w_cv):
-        d = np.asarray(depth, dtype=np.float64)[::stride, ::stride]
+        d = np.asarray(depth)[::stride, ::stride]
         vs, us = np.nonzero(d > 0)
         if len(vs) == 0:
             continue
-        z = d[vs, us]
+        z = d[vs, us].astype(np.float64)
         us = us * stride + 0.5
         vs = vs * stride + 0.5
         x = (us - K[0, 2]) / K[0, 0] * z
         y = (vs - K[1, 2]) / K[1, 1] * z
         cam = np.stack([x, y, z, np.ones_like(z)], axis=1)
-        out.append((cam @ np.asarray(c2w, dtype=np.float64).T)[:, :3])
+        world = (cam @ np.asarray(c2w, dtype=np.float64).T)[:, :3]
+        out.append(_voxel_dedup(world, voxel_m).astype(np.float32))
     if not out:
-        return np.zeros((0, 3))
-    pts = np.concatenate(out)
-    keys = np.floor(pts / voxel_m).astype(np.int64)
-    _, first = np.unique(keys, axis=0, return_index=True)
-    return pts[np.sort(first)]
+        return np.zeros((0, 3), dtype=np.float32)
+    return _voxel_dedup(np.concatenate(out), voxel_m)
 
 
 def _plane_from_points(p: np.ndarray) -> tuple[np.ndarray, float] | None:
@@ -138,15 +149,18 @@ def _ransac_vertical(points: np.ndarray, inlier_m: float, iters: int, rng) -> tu
             best = (count, n, d, inl)
     if best is None:
         return None
-    _, n, d, inl = best
-    # refine on the inliers (least squares via SVD)
+    count, n, d, inl = best
+    # refine on the inliers (least squares via SVD) — but a wall stays vertical: if the refined normal
+    # tilts away from horizontal (the inliers were a strip across a table top, say) keep the RANSAC plane
     q = points[inl]
     centroid = q.mean(axis=0)
     _, _, vt = np.linalg.svd(q - centroid, full_matrices=False)
-    n = vt[-1]
-    n = n / np.linalg.norm(n)
-    d = float(-n @ centroid)
-    inl = np.abs(points @ n + d) < inlier_m
+    n2 = vt[-1] / np.linalg.norm(vt[-1])
+    if abs(n2 @ UP) < np.cos(np.radians(85.0)):
+        d2 = float(-n2 @ centroid)
+        inl2 = np.abs(points @ n2 + d2) < inlier_m
+        if inl2.sum() >= count:
+            return n2, d2, inl2
     return n, d, inl
 
 

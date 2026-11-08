@@ -17,7 +17,7 @@ from recon3d.jobs.pipeline import OnProgress, _log
 from recon3d.objects import assign as assign_mod
 from recon3d.objects.relations import compute_relations
 from recon3d.objects.render_depth import read_splat_positions
-from recon3d.objects.segments import Segment, merge_segments, support_of, track_to_segment
+from recon3d.objects.segments import Segment, merge_segments, support_of, track_to_segment, wall_support
 from recon3d.objects.structure import Room, Wall, depth_point_cloud, fit_room
 from recon3d.objects.table import ObjectRecord, write_objects
 from recon3d.objects.thumbs import crop_thumbnail
@@ -29,6 +29,9 @@ STAGE_VERIFY = "识别物体 (确认)"
 STAGE_ASSIGN = "识别物体 (归属)"
 DEPTH_SCALE = 0.5
 CROP_PAD = 0.2
+# VLM budget: only the MAX_VERIFY_SEGMENTS longest-tracked segments are put to the VLM (each costs up
+# to 2 asks per level); the rest are dropped and counted in the log.
+MAX_VERIFY_SEGMENTS = 150
 STRUCTURE_ZH = {"floor": "地面", "ceiling": "天花板", "wall": "墙面"}
 
 # Injection points for tests (the real ones import torch / transformers lazily).
@@ -117,14 +120,21 @@ def _verify_level(level, segs, supports, room, vlm, frames, root, rng, used, log
         if i in used:
             continue
         support = supports[i]
-        options = candidate_entries(seg, support, level)
         if level == "structure":
+            # Spec §4.1: a door / window candidate is confirmed as such or dropped, never relabelled.
             top = max(seg.votes, key=seg.votes.get) if seg.votes else None
             if top not in ("door", "window"):
                 continue
-            options = [e for e in options if door_window_ok(seg, e, room)]
-        if not options:
-            continue
+            used.add(i)
+            support = wall_support(seg, room) or support  # a window sill over a desk is still "in the wall"
+            options = [e for e in candidate_entries(seg, support, level) if door_window_ok(seg, e, room)]
+            if not options:
+                log(f"objects: verify structure seg{i} voted {top} but fails the door/window geometry -> dropped")
+                continue
+        else:
+            options = candidate_entries(seg, support, level)
+            if not options:
+                continue
         entry = confirm(seg, support, options, _crops(seg, frames, root), vlm, rng)
         if entry is None:
             log(f"objects: verify {level} seg{i} ({seg.size_lwh[2]:.2f} m high) -> rejected by VLM")
@@ -203,11 +213,16 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
         on_progress(0.55, STAGE_VERIFY)
         supports = {i: support_of(seg, room, segs[:i]) for i, seg in enumerate(segs)}
         rng = random.Random(0)
+        used: set[int] = set()
+        if len(segs) > MAX_VERIFY_SEGMENTS:
+            # keep the longest-tracked segments; the rest never reach the VLM
+            order = sorted(range(len(segs)), key=lambda i: -len(segs[i].frames))
+            used.update(order[MAX_VERIFY_SEGMENTS:])
+            log(f"objects: verify budget {MAX_VERIFY_SEGMENTS} of {len(segs)} segments, {len(segs) - MAX_VERIFY_SEGMENTS} skipped")
         try:
             vlm = _vlm(device, profile)
         except DownloadError as e:
             raise ModelDownloadFailed(str(e)) from e
-        used: set[int] = set()
         verified: list[Verified] = []
         for li, level in enumerate(("structure", "furniture", "item")):
             try:
@@ -225,7 +240,7 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
         counts = {lv: sum(v.entry.level == lv for v in verified) for lv in ("structure", "furniture", "item")}
         log(
             f"objects: verify {len(segs)} segments -> {before} confirmed, {len(verified)} after harmony {counts}, "
-            f"{time.monotonic() - t0:.1f}s"
+            f"{getattr(vlm, 'asks', '?')} asks, {time.monotonic() - t0:.1f}s"
         )
 
         # --- assignment (0.9 -> 0.97) ---

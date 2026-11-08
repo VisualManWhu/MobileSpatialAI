@@ -21,13 +21,38 @@ WALL_FRACTION = 0.6
 SLICE_MIN_FRACTION = 0.02  # a 1-voxel slice with fewer than this of the peak slice's voxels is an outlier
 
 
+@dataclass(frozen=True)
+class PackedMask:
+    """A depth-resolution bool mask stored as its bounding box plus the bit-packed crop: a small object
+    in a 540x960 frame costs a few hundred bytes instead of 65 KB."""
+
+    box: tuple[int, int, int, int]  # y0, y1, x0, x1 (half-open)
+    bits: np.ndarray
+
+
+def pack_mask(mask: np.ndarray) -> PackedMask:
+    ys, xs = np.nonzero(mask)
+    if len(ys) == 0:
+        return PackedMask((0, 0, 0, 0), np.zeros(0, dtype=np.uint8))
+    y0, y1, x0, x1 = int(ys.min()), int(ys.max()) + 1, int(xs.min()), int(xs.max()) + 1
+    return PackedMask((y0, y1, x0, x1), np.packbits(mask[y0:y1, x0:x1]))
+
+
+def unpack_mask(pm: PackedMask, h: int, w: int) -> np.ndarray:
+    out = np.zeros((h, w), dtype=bool)
+    y0, y1, x0, x1 = pm.box
+    if y1 > y0 and x1 > x0:
+        out[y0:y1, x0:x1] = np.unpackbits(pm.bits)[: (y1 - y0) * (x1 - x0)].reshape(y1 - y0, x1 - x0).astype(bool)
+    return out
+
+
 @dataclass
 class Track:
     """Produced by track.py; defined here so the CPU-only code and tests never import torch."""
 
     id: int
     frames: list[int]  # ascending frame indices
-    masks: list[np.ndarray]  # np.packbits of the depth-resolution bool mask, parallel to frames
+    masks: list[PackedMask]  # depth-resolution masks, parallel to frames
     boxes: list[tuple[float, float, float, float]]  # full-res pixel boxes, parallel to frames
     votes: dict[str, float] = field(default_factory=dict)  # proposer label -> summed score
 
@@ -55,15 +80,11 @@ def voxel_key(points: np.ndarray) -> np.ndarray:
     return np.floor(np.asarray(points, dtype=np.float64) / VOXEL_M).astype(np.int64)
 
 
-def _unpack(mask_packed: np.ndarray, h: int, w: int) -> np.ndarray:
-    return np.unpackbits(mask_packed)[: h * w].reshape(h, w).astype(bool)
-
-
 def _backproject(mask: np.ndarray, depth: np.ndarray, K: np.ndarray, c2w: np.ndarray) -> np.ndarray:
     vs, us = np.nonzero(mask & (depth > 0))
     if len(vs) == 0:
         return np.zeros((0, 3))
-    z = np.asarray(depth, dtype=np.float64)[vs, us]
+    z = depth[vs, us].astype(np.float64)  # index first: no full-frame copy per call
     x = (us + 0.5 - K[0, 2]) / K[0, 0] * z
     y = (vs + 0.5 - K[1, 2]) / K[1, 1] * z
     cam = np.stack([x, y, z, np.ones_like(z)], axis=1)
@@ -126,7 +147,7 @@ def track_to_segment(track: Track, depths, Ks_small: np.ndarray, c2w_cv: np.ndar
     keys = []
     areas = np.zeros(len(track.frames))
     for i, (fi, packed) in enumerate(zip(track.frames, track.masks)):
-        mask = _unpack(packed, h, w)
+        mask = unpack_mask(packed, h, w)
         areas[i] = mask.sum()
         pts = _backproject(mask, depths[fi], Ks_small[fi], c2w_cv[fi])
         if len(pts):
@@ -157,8 +178,10 @@ def track_to_segment(track: Track, depths, Ks_small: np.ndarray, c2w_cv: np.ndar
     )
 
 
-def _voxel_set(seg: Segment) -> set[tuple[int, int, int]]:
-    return set(map(tuple, seg.voxels.tolist()))
+def _packed(voxels: np.ndarray) -> np.ndarray:
+    """int64 key per voxel (21 bits per axis), sorted and unique."""
+    k = voxels.astype(np.int64) + (1 << 20)
+    return np.unique((k[:, 0] << 42) | (k[:, 1] << 21) | k[:, 2])
 
 
 def _combine(a: Segment, b: Segment) -> Segment:
@@ -187,20 +210,41 @@ def merge_segments(segments: list[Segment]) -> list[Segment]:
     """Greedy: two segments with no frame in common whose voxel overlap is >= MERGE_OVERLAP of the
     smaller one are the same object seen again. Segments that share a frame are never merged."""
     out: list[Segment] = []
+    packed: list[np.ndarray] = []  # parallel to out
+    frames: list[set[int]] = []
     for seg in sorted(segments, key=lambda s: -len(s.voxels)):
-        sv = _voxel_set(seg)
+        sv = _packed(seg.voxels)
         sf = set(seg.frames)
         for i, other in enumerate(out):
-            if sf & set(other.frames):
+            if sf & frames[i]:
                 continue
-            ov = _voxel_set(other)
-            overlap = len(sv & ov) / max(1, min(len(sv), len(ov)))
+            if np.any(seg.bbox_max < other.bbox_min) or np.any(seg.bbox_min > other.bbox_max):
+                continue  # bboxes apart: no voxel can be shared
+            ov = packed[i]
+            overlap = len(np.intersect1d(sv, ov, assume_unique=True)) / max(1, min(len(sv), len(ov)))
             if overlap >= MERGE_OVERLAP:
                 out[i] = _combine(other, seg)
+                packed[i] = _packed(out[i].voxels)
+                frames[i] = set(out[i].frames)
                 break
         else:
             out.append(seg)
+            packed.append(sv)
+            frames.append(sf)
     return out
+
+
+def wall_support(seg: Segment, room: Room) -> str | None:
+    """`wall:<id>` when at least WALL_FRACTION of the voxels lie within WALL_BAND_M of one wall plane,
+    else None. Used directly for door / window candidates, whose sill may sit on a desk."""
+    if not room.walls or len(seg.voxels) == 0:
+        return None
+    centres = (seg.voxels + 0.5) * VOXEL_M
+    for wall in room.walls:
+        frac = (np.abs(room.wall_distance(centres, wall)) < WALL_BAND_M).mean()
+        if frac >= WALL_FRACTION:
+            return f"wall:{wall.id}"
+    return None
 
 
 def support_of(seg: Segment, room: Room, others: list[Segment]) -> str:
@@ -221,10 +265,4 @@ def support_of(seg: Segment, room: Room, others: list[Segment]) -> str:
                 best = (gap, i)
     if best is not None:
         return f"on:{best[1]}"
-    if room.walls:
-        centres = (seg.voxels + 0.5) * VOXEL_M
-        for wall in room.walls:
-            frac = (np.abs(room.wall_distance(centres, wall)) < WALL_BAND_M).mean()
-            if frac >= WALL_FRACTION:
-                return f"wall:{wall.id}"
-    return "none"
+    return wall_support(seg, room) or "none"

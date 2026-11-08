@@ -133,3 +133,20 @@ def test_confidence_is_vote_share():
     s = seg((0.4, 0.4, 0.9), votes={"chair": 3.0, "stool": 1.0})
     assert abs(confidence_of(s, vocab.entry("chair")) - 0.75) < 1e-9
     assert confidence_of(seg((0.4, 0.4, 0.9)), vocab.entry("chair")) == 0.0
+
+
+def test_item_inside_furniture_uses_voxel_overlap_not_bbox():
+    """A pillow on a sofa or a book on a shelf lies inside the furniture bbox but occupies empty space:
+    kept. A chunk of the table surface shares the table's voxels: dropped (review finding #7)."""
+    sofa = seg((2.0, 0.9, 0.8), fill=False)  # hollow shell: the seat cavity is empty
+    pillow = seg((0.5, 0.4, 0.2), bottom_y=0.4, x=0.3, fill=True)  # fully inside the sofa bbox, no shared voxels
+    chunk = Segment([1], [0, 1, 2, 3, 4], sofa.voxels[: len(sofa.voxels) // 3], sofa.bbox_min, sofa.bbox_max, (0.6, 0.6, 0.3), {}, [(0, (0, 0, 10, 10))])
+    kept = harmony_filter(
+        [
+            Verified(sofa, vocab.entry("sofa"), "floor", 0.9),
+            Verified(pillow, vocab.entry("pillow"), "none", 0.9),
+            Verified(chunk, vocab.entry("box"), "none", 0.9),
+        ],
+        ROOM,
+    )
+    assert [k.entry.en for k in kept] == ["sofa", "pillow"]
