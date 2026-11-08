@@ -36,7 +36,7 @@ if [[ -z "$PORT" ]]; then
   set -- "$@" --port "$PORT"
 fi
 
-echo "档位：$PROFILE    数据目录：$SERVER_DIR/data    停止：Ctrl+C"
+echo "档位：$PROFILE    数据目录：$SERVER_DIR/data    显卡：${CUDA_VISIBLE_DEVICES:-全部可见（多卡机器用 CUDA_VISIBLE_DEVICES=<编号> 指定）}    停止：Ctrl+C"
 if [[ $IN_WSL == 1 ]]; then
   echo "WSL 模式：服务监听 $PORT，手机访问的是 Windows 的 8765（需已按文档第 2 步设置端口转发和防火墙）。"
   echo "手机浏览器打开：http://<笔记本的 Wi-Fi IP>:8765/api/v1/health   （IP 在 PowerShell 里 ipconfig 查看）"
