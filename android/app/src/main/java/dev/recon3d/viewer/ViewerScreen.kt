@@ -293,7 +293,14 @@ private fun ObjectsOverlay(record: CaptureRecord, loaded: Boolean, webView: WebV
                             horizontalArrangement = Arrangement.spacedBy(12.dp),
                         ) {
                             Thumbnail(dir?.let { File(it, entry.thumb).path })
-                            Text(title, style = MaterialTheme.typography.bodyLarge)
+                            Column {
+                                Text(title, style = MaterialTheme.typography.bodyLarge)
+                                Text(
+                                    itemDetail(entry),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
                         }
                     }
                 }

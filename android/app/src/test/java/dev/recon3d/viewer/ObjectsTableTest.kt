@@ -40,6 +40,9 @@ class ObjectsTableTest {
         assertEquals("椅子 ×2", groupTitle(groups[0]))
         assertEquals("椅子 2", itemTitle(groups[0], 1))
         assertEquals("杯子 1", itemTitle(groups[1], 0))
+        // How many sampled frames the object was detected in: a low count flags a likely false positive.
+        assertEquals("出现 4 帧", itemDetail(groups[0].items[1]))
+        assertEquals("出现 2 帧", itemDetail(groups[1].items[0]))
     }
 }
 

@@ -54,6 +54,9 @@ fun groupTitle(group: ObjectGroup): String = "${group.labelZh} ×${group.items.s
 
 fun itemTitle(group: ObjectGroup, index: Int): String = "${group.labelZh} ${index + 1}"
 
+/** Second line of a list item: the number of sampled frames the object was detected in. */
+fun itemDetail(entry: ObjectEntry): String = "出现 ${entry.views} 帧"
+
 /** The JS call that flies the viewer to [entry] and highlights it (numbers via kotlinx, never locale formatted). */
 fun flyToObjectJs(entry: ObjectEntry): String {
     fun v(c: List<Float>) = """{"x":${c[0]},"y":${c[1]},"z":${c[2]}}"""
