@@ -71,17 +71,23 @@ def test_write_objects_produces_json_bin_and_zip(tmp_path):
     out = tmp_path / "job" / "objects"
     (out / "thumbs").mkdir(parents=True)
     (out / "thumbs" / "1.jpg").write_bytes(b"jpg")
-    rec = table.ObjectRecord(1, "chair", "椅子", 0.64, 17, (1.0, 0.5, -2.0), (0.7, 0.0, -2.3), (1.3, 1.0, -1.7), 3)
+    rec = table.ObjectRecord(
+        1, "chair", "椅子", 0.64, 17, (1.0, 0.5, -2.0), (0.7, 0.0, -2.3), (1.3, 1.0, -1.7), 3,
+        level="furniture", size=(0.6, 0.6, 1.0), support="floor", confidence=0.75,
+    )
     ids = np.array([1, 0, 1, 1], dtype=np.uint16)
+    structure = {"floor_y": 0.0, "ceiling_y": None, "walls": [{"id": 1, "normal": [1, 0, 0], "d": 2.0, "u": [0, 0, 1], "extent": [-2, 2, 0, 2.6]}]}
     zpath = table.write_objects(
-        out, "abc123", frames_used=12, ids=ids, objects=[rec], relations=[{"a": 1, "rel": "on", "b": 2}]
+        out, "abc123", frames_used=12, ids=ids, objects=[rec], relations=[{"a": 1, "rel": "on", "b": 2}], structure=structure
     )
     assert zpath == tmp_path / "job" / "objects.zip"
     j = json.loads((out / "objects.json").read_text(encoding="utf-8"))
-    assert j["version"] == 1 and j["job_id"] == "abc123" and j["frames_used"] == 12 and j["gaussians"] == 4
+    assert j["version"] == 2 and j["job_id"] == "abc123" and j["frames_used"] == 12 and j["gaussians"] == 4
+    assert j["structure"] == structure
     o = j["objects"][0]
     assert o["id"] == 1 and o["label_zh"] == "椅子" and o["thumb"] == "thumbs/1.jpg" and o["gaussian_count"] == 3
     assert o["bbox"] == {"min": [0.7, 0.0, -2.3], "max": [1.3, 1.0, -1.7]}
+    assert o["level"] == "furniture" and o["size"] == [0.6, 0.6, 1.0] and o["support"] == "floor" and o["confidence"] == 0.75
     assert j["relations"] == [{"a": 1, "rel": "on", "b": 2}]
     assert (out / "objects.bin").read_bytes() == table.encode_ids(ids)
     assert sorted(zipfile.ZipFile(zpath).namelist()) == ["objects.bin", "objects.json", "thumbs/1.jpg"]

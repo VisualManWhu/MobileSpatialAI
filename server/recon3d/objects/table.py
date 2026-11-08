@@ -8,7 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
-VERSION = 1
+VERSION = 2  # v2 adds level / size / support / confidence per object and a structure block
 
 
 @dataclass(frozen=True)
@@ -22,6 +22,10 @@ class ObjectRecord:
     bbox_min: tuple[float, float, float]
     bbox_max: tuple[float, float, float]
     gaussian_count: int
+    level: str = "item"  # structure | furniture | item
+    size: tuple[float, float, float] = (0.0, 0.0, 0.0)  # l, w, h metres (gravity-aligned)
+    support: str = "none"  # floor | ceiling | on:<id> | wall:<id> | none
+    confidence: float = 0.0
 
 
 def encode_ids(ids: np.ndarray) -> bytes:
@@ -46,6 +50,7 @@ def write_objects(
     ids: np.ndarray,
     objects: list[ObjectRecord],
     relations: list[dict],
+    structure: dict | None = None,
 ) -> Path:
     """Writes objects.json and objects.bin into out_dir (thumbs/ must already be there) and zips the
     directory into out_dir.parent / objects.zip. Returns the zip path."""
@@ -67,10 +72,15 @@ def write_objects(
                 "bbox": {"min": _f3(o.bbox_min), "max": _f3(o.bbox_max)},
                 "gaussian_count": int(o.gaussian_count),
                 "thumb": f"thumbs/{o.id}.jpg",
+                "level": o.level,
+                "size": _f3(o.size),
+                "support": o.support,
+                "confidence": round(float(o.confidence), 4),
             }
             for o in objects
         ],
         "relations": relations,
+        "structure": structure if structure is not None else {"floor_y": None, "ceiling_y": None, "walls": []},
     }
     (out_dir / "objects.json").write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
     (out_dir / "objects.bin").write_bytes(encode_ids(ids))

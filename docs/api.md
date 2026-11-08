@@ -88,13 +88,20 @@ multipart 表单，字段 `capture` 为拍摄包 zip（见 capture-format.md）�
 
 - `objects.json`：
   ```json
-  {"version": 1, "job_id": "…", "frames_used": 225, "gaussians": 983112,
+  {"version": 2, "job_id": "…", "frames_used": 1123, "gaussians": 983112,
    "objects": [{"id": 1, "label": "chair", "label_zh": "椅子", "score": 0.64, "views": 17,
                 "center": [x, y, z], "bbox": {"min": [x, y, z], "max": [x, y, z]},
-                "gaussian_count": 23410, "thumb": "thumbs/1.jpg"}],
-   "relations": [{"a": 3, "rel": "on", "b": 7}]}
+                "gaussian_count": 23410, "thumb": "thumbs/1.jpg",
+                "level": "furniture", "size": [0.6, 0.6, 1.0], "support": "floor", "confidence": 0.75}],
+   "relations": [{"a": 3, "rel": "on", "b": 7}],
+   "structure": {"floor_y": 0.0, "ceiling_y": 2.6,
+                 "walls": [{"id": 1, "normal": [nx, 0, nz], "d": 2.0, "u": [ux, 0, uz], "extent": [u0, u1, y0, y1]}]}}
   ```
   `id` 从 1 起连续；坐标为场景世界系（与 `scene.splat` 一致，+Y 向上）；`rel` ∈ `on` / `in` / `next_to` / `left_of` / `right_of`。
+  v2 新增：`level` ∈ `structure`（地面、天花板、墙面、门、窗）/ `furniture` / `item`；`size` 为重力对齐的长、宽、高（米）；
+  `support` ∈ `floor` / `ceiling` / `on:<id>` / `wall:<id>` / `none`；`confidence` 0–1（提议器与最终标签一致的帧占比）；
+  `views` 为该物体被跟踪到的帧数。`structure` 为房间结构：墙的平面方程 `normal · p + d = 0`（法向朝室内），
+  `u` 为墙面内的水平轴，`extent` 为 `[u_min, u_max, y_min, y_max]`。版本 1 的表（无这些字段）手机端仍可打开。
 - `objects.bin`：`gaussians` 个 little-endian `uint16`，第 i 个是 `scene.splat` 第 i 个高斯所属物体 `id`，0 = 无。
 - `thumbs/{id}.jpg`：代表截图（长边 256）。
 
