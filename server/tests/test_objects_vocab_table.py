@@ -33,6 +33,8 @@ def test_candidates_use_size_and_support():
     # a 15 cm flat thing on a table: phone yes, remote yes, monitor no
     c = {e.en for e in vocab.candidates((0.15, 0.07, 0.01), "on:3", "item")}
     assert {"phone", "remote control"} <= c and "monitor" not in c
+    # voxel-measured sizes run a cell large: a 21 cm "phone" still qualifies (3 cm tolerance)
+    assert "phone" in {e.en for e in vocab.candidates((0.21, 0.1, 0.04), "on:3", "item")}
     # "none" support matches everything that fits the size
     assert "chair" in {e.en for e in vocab.candidates((0.5, 0.5, 0.9), "none", "furniture")}
     # by_level partitions the vocab

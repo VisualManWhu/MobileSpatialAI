@@ -1,7 +1,8 @@
-"""capture.zip + scene.splat/scene.ply -> objects.zip (object table), see spec 2026-11-07 §4.4."""
+"""capture.zip + scene.ply/scene.splat -> objects.zip, v2 (spec 2026-11-08 §4):
+structure (planes) -> tracking (identity) -> verification (size/support + VLM) -> voxel assignment."""
 from __future__ import annotations
 
-import math
+import random
 import shutil
 import time
 import traceback
@@ -14,52 +15,30 @@ from recon3d.capture.poses import gl_to_cv_c2w
 from recon3d.config import Profile
 from recon3d.jobs.pipeline import OnProgress, _log
 from recon3d.objects import assign as assign_mod
-from recon3d.objects import merge as merge_mod
-from recon3d.objects import table
 from recon3d.objects.relations import compute_relations
 from recon3d.objects.render_depth import read_splat_positions
+from recon3d.objects.segments import Segment, merge_segments, support_of, track_to_segment
+from recon3d.objects.structure import Room, Wall, depth_point_cloud, fit_room
+from recon3d.objects.table import ObjectRecord, write_objects
 from recon3d.objects.thumbs import crop_thumbnail
-from recon3d.objects.vocab import zh_label
+from recon3d.objects.verify import Verified, candidate_entries, confidence_of, confirm, door_window_ok, harmony_filter
 
-STAGE_DETECT = "识别物体 (检测)"
-STAGE_MERGE = "识别物体 (合并)"
+STAGE_STRUCTURE = "识别物体 (结构)"
+STAGE_TRACK = "识别物体 (跟踪)"
+STAGE_VERIFY = "识别物体 (确认)"
 STAGE_ASSIGN = "识别物体 (归属)"
-STAGE_THUMBS = "识别物体 (截图)"
-MAX_FRAMES = 240
 DEPTH_SCALE = 0.5
-MAX_POINTS_PER_DETECTION = 2000
-# Sampled frames are ~1 s apart on a dense trajectory: an object "seen" in only a handful of them is
-# almost always a flicker (first office run: 87 of 169 objects in 2 frames, mostly windows/doors/lamps
-# that were not there; at MIN_VIEWS=3 the phone review still found the 3-5 frame ones to be noise).
-MIN_VIEWS = 6
+CROP_PAD = 0.2
+STRUCTURE_ZH = {"floor": "地面", "ceiling": "天花板", "wall": "墙面"}
 
-# Injection points for tests (resolved lazily: the real ones import torch/transformers).
-detector_factory = None  # (device) -> object with detect(PIL.Image) -> list[FrameDetection], close()
+# Injection points for tests (the real ones import torch / transformers lazily).
+tracker_factory = None  # (device, profile) -> object with run(paths, mask_hw, on_frame) -> list[Track], close()
+vlm_factory = None  # (device, profile) -> object with ask(images, prompt) -> str, close()
 render_depths_fn = None  # same signature as render_depth.render_depths
 
 
 class ModelDownloadFailed(Exception):
-    """Detector weights could not be downloaded (network); user text set by the worker."""
-
-
-def sample_indices(n: int) -> list[int]:
-    k = max(1, math.ceil(n / MAX_FRAMES))
-    return list(range(0, n, k))
-
-
-def _detector(device: str):
-    if detector_factory is not None:
-        return detector_factory(device)
-    from recon3d.objects.detect import Detector
-
-    return Detector(device)
-
-
-def _render_depths(*args, **kwargs):
-    fn = render_depths_fn
-    if fn is None:
-        from recon3d.objects.render_depth import render_depths as fn
-    return fn(*args, **kwargs)
+    """Detector / tracker / VLM weights could not be downloaded (network); user text set by the worker."""
 
 
 def _device() -> str:
@@ -71,27 +50,92 @@ def _device() -> str:
         return "cpu"
 
 
-def _shrink(mask: np.ndarray, w: int, h: int) -> np.ndarray:
-    return np.asarray(Image.fromarray(mask).resize((w, h), Image.NEAREST), dtype=bool)
+def _tracker(device: str, profile: Profile):
+    if tracker_factory is not None:
+        return tracker_factory(device, profile)
+    from recon3d.objects.track import Tracker
+
+    return Tracker(device, profile.objects_detector, profile.objects_sam)
 
 
-def _backproject(mask_small: np.ndarray, depth: np.ndarray, K_small: np.ndarray, c2w: np.ndarray) -> np.ndarray:
-    """World points of the mask pixels that have rendered depth, subsampled to MAX_POINTS_PER_DETECTION."""
-    vs, us = np.nonzero(mask_small & (depth > 0))
-    if len(vs) == 0:
-        return np.zeros((0, 3), dtype=np.float64)
-    if len(vs) > MAX_POINTS_PER_DETECTION:
-        pick = np.linspace(0, len(vs) - 1, MAX_POINTS_PER_DETECTION).astype(int)
-        vs, us = vs[pick], us[pick]
-    z = depth[vs, us].astype(np.float64)
-    x = (us + 0.5 - K_small[0, 2]) / K_small[0, 0] * z
-    y = (vs + 0.5 - K_small[1, 2]) / K_small[1, 1] * z
-    cam = np.stack([x, y, z, np.ones_like(z)], axis=1)
-    return (cam @ c2w.T)[:, :3]
+def _vlm(device: str, profile: Profile):
+    if vlm_factory is not None:
+        return vlm_factory(device, profile)
+    from recon3d.objects.vlm import QwenVlm
+
+    return QwenVlm(profile.objects_vlm, device, four_bit=profile.objects_vlm_4bit)
+
+
+def _render_depths(*args, **kwargs):
+    fn = render_depths_fn
+    if fn is None:
+        from recon3d.objects.render_depth import render_depths as fn
+    return fn(*args, **kwargs)
+
+
+def _free_gb(device: str) -> float:
+    if device != "cuda":
+        return 0.0
+    try:
+        import torch
+
+        free, _ = torch.cuda.mem_get_info()
+        return free / 2**30
+    except Exception:  # pragma: no cover
+        return 0.0
+
+
+def _crop(img: Image.Image, box, pad: float = CROP_PAD) -> Image.Image:
+    x0, y0, x1, y1 = box
+    w, h = x1 - x0, y1 - y0
+    x0, y0 = max(0, x0 - pad * w), max(0, y0 - pad * h)
+    x1, y1 = min(img.width, x1 + pad * w), min(img.height, y1 + pad * h)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return img.copy()
+    return img.crop((int(x0), int(y0), int(x1), int(y1)))
+
+
+def _crops(seg: Segment, frames, root: Path) -> list[Image.Image]:
+    out = []
+    for fi, box in seg.best_views[:5]:
+        img = Image.open(root / frames[fi].image).convert("RGB")
+        out.append(_crop(img, box))
+    return out
+
+
+def _wall_bbox(wall: Wall, pad: float = 0.05) -> tuple[np.ndarray, np.ndarray]:
+    u0, u1, y0, y1 = wall.extent
+    base = -wall.d * wall.normal
+    corners = np.array([base + wall.u * u + np.array([0.0, y, 0.0]) for u in (u0, u1) for y in (y0, y1)])
+    return corners.min(axis=0) - pad, corners.max(axis=0) + pad
+
+
+def _verify_level(level, segs, supports, room, vlm, frames, root, rng, used, log) -> list[Verified]:
+    """Confirms the segments of one level (largest first). Structure level = door / window only."""
+    out: list[Verified] = []
+    for i, seg in enumerate(segs):
+        if i in used:
+            continue
+        support = supports[i]
+        options = candidate_entries(seg, support, level)
+        if level == "structure":
+            top = max(seg.votes, key=seg.votes.get) if seg.votes else None
+            if top not in ("door", "window"):
+                continue
+            options = [e for e in options if door_window_ok(seg, e, room)]
+        if not options:
+            continue
+        entry = confirm(seg, support, options, _crops(seg, frames, root), vlm, rng)
+        if entry is None:
+            log(f"objects: verify {level} seg{i} ({seg.size_lwh[2]:.2f} m high) -> rejected by VLM")
+            continue
+        out.append(Verified(seg, entry, support, confidence_of(seg, entry)))
+        used.add(i)
+    return out
 
 
 def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int:
-    """Builds the object table for a finished job; returns the number of objects."""
+    """Builds the v2 object table for a finished job; returns the number of objects (structure included)."""
     from recon3d.capture.format import load_capture
     from recon3d.objects.detect import DownloadError
 
@@ -99,17 +143,19 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
     workdir = job_dir / "capture"
     out_dir = job_dir / "objects"
     device = _device()
-    detector = None
+    tracker = vlm = None
     t_start = time.monotonic()
+    log = lambda text: _log(job_dir, text)  # noqa: E731
     try:
-        on_progress(0.0, STAGE_DETECT)
+        # --- inputs ---
+        on_progress(0.0, STAGE_STRUCTURE)
         cap = load_capture(job_dir / "capture.zip", workdir)
-        idx = sample_indices(len(cap.frames))
-        frames = [cap.frames[i] for i in idx]
+        frames = cap.frames
+        n = len(frames)
         W, H = cap.manifest.image_width, cap.manifest.image_height
         poses_path = job_dir / "poses_cv.npy"
         if poses_path.is_file():
-            c2w = np.asarray(np.load(poses_path)[idx], dtype=np.float64)
+            c2w = np.asarray(np.load(poses_path), dtype=np.float64)[:n]
         else:
             c2w = np.stack([gl_to_cv_c2w(f.pose) for f in frames])
         Ks = np.array([[[f.fx, 0, f.cx], [0, f.fy, f.cy], [0, 0, 1]] for f in frames], dtype=np.float64)
@@ -118,112 +164,168 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
         Ks_small[:, 0, :] *= w / W
         Ks_small[:, 1, :] *= h / H
 
-        # --- detect + segment (0 -> 0.6); depth rendered per frame for back-projection ---
+        # --- structure (0 -> 0.15): depth of every frame, then planes ---
         t0 = time.monotonic()
-        try:
-            detector = _detector(device)
-        except DownloadError as e:
-            raise ModelDownloadFailed(str(e)) from e
-        dets: list[merge_mod.Detection] = []
-        # Depth-resolution masks, bit-packed (a full-res SAM mask is ~2 MB; 1000+ detections would hold
-        # gigabytes), plus each mask's full-res area for picking the thumbnail; both parallel to dets.
-        det_masks: list[np.ndarray] = []
-        det_areas: list[float] = []
         depths: list[np.ndarray] = []
-        depth_iter = _render_depths(job_dir / "scene.ply", c2w, Ks, W, H, device=device, scale=DEPTH_SCALE)
-        for fi, (frame, depth) in enumerate(zip(frames, depth_iter)):
-            depths.append(depth)
-            img = Image.open(cap.root / frame.image).convert("RGB")
-            try:
-                found = detector.detect(img)
-            except DownloadError as e:
-                raise ModelDownloadFailed(str(e)) from e
-            for fd in found:
-                small = _shrink(fd.mask, w, h)
-                pts = _backproject(small, depth, Ks_small[fi], c2w[fi])
-                dets.append(merge_mod.Detection(fi, fd.label, fd.score, fd.box, pts))
-                det_masks.append(np.packbits(small))
-                det_areas.append(float(fd.mask.sum()))
-            del found
-            on_progress(0.6 * (fi + 1) / len(frames), STAGE_DETECT)
-        detector.close()
-        detector = None
-        _log(job_dir, f"objects: detect {len(frames)} frames, {len(dets)} detections, {time.monotonic() - t0:.1f}s")
-
-        # --- merge (0.6 -> 0.75) ---
-        t0 = time.monotonic()
-        on_progress(0.6, STAGE_MERGE)
-        merged = merge_mod.merge_detections(dets, min_views=MIN_VIEWS)
-        _log(job_dir, f"objects: merge -> {len(merged)} objects, {time.monotonic() - t0:.1f}s")
-
-        # --- assign (0.75 -> 0.95) ---
-        t0 = time.monotonic()
-        on_progress(0.75, STAGE_ASSIGN)
-        positions = read_splat_positions(job_dir / "scene.splat")
-        masks = [
-            assign_mod.ObjectMasks(dets[di].frame, oi + 1, np.unpackbits(det_masks[di])[: h * w].reshape(h, w).astype(bool))
-            for oi, obj in enumerate(merged)
-            for di in obj.members
-        ]
-        if merged:
-            ids = assign_mod.assign_gaussians(
-                positions, c2w, Ks_small, depths, masks,
-                bbox_min=np.stack([o.bbox_min for o in merged]),
-                bbox_max=np.stack([o.bbox_max for o in merged]),
-                device=device,
-            )
-        else:
-            ids = np.zeros(len(positions), dtype=np.uint16)
-        # An object without a single Gaussian cannot be highlighted: drop it and renumber the rest 1..N.
-        counts = np.bincount(ids, minlength=len(merged) + 1)
-        keep = [oi for oi in range(len(merged)) if counts[oi + 1] > 0]
-        remap = np.zeros(len(merged) + 1, dtype=np.uint16)
-        for new_id, oi in enumerate(keep, start=1):
-            remap[oi + 1] = new_id
-        ids = remap[ids]
-        dropped = len(merged) - len(keep)
-        merged = [merged[oi] for oi in keep]
-        _log(
-            job_dir,
-            f"objects: assign {len(positions)} gaussians, {int((ids > 0).sum())} assigned, "
-            f"{dropped} objects without gaussians dropped, {time.monotonic() - t0:.1f}s",
+        for i, d in enumerate(_render_depths(job_dir / "scene.ply", c2w, Ks, W, H, device=device, scale=DEPTH_SCALE)):
+            depths.append(np.asarray(d, dtype=np.float16))
+            on_progress(0.12 * (i + 1) / n, STAGE_STRUCTURE)
+        cloud = depth_point_cloud(depths, Ks_small, c2w)
+        room = fit_room(cloud, c2w[:, :3, 3])
+        on_progress(0.15, STAGE_STRUCTURE)
+        log(
+            f"objects: structure {len(cloud)} points, floor={room.floor_y}, ceiling={room.ceiling_y}, "
+            f"{len(room.walls)} walls, {time.monotonic() - t0:.1f}s"
         )
 
-        # --- thumbnails + relations + table (0.95 -> 1.0) ---
+        # --- tracking (0.15 -> 0.55) ---
         t0 = time.monotonic()
-        on_progress(0.95, STAGE_THUMBS)
+        on_progress(0.15, STAGE_TRACK)
+        try:
+            tracker = _tracker(device, profile)
+            paths = [cap.root / f.image for f in frames]
+            tracks = tracker.run(paths, (h, w), on_frame=lambda fi: on_progress(0.15 + 0.4 * (fi + 1) / n, STAGE_TRACK))
+        except DownloadError as e:
+            raise ModelDownloadFailed(str(e)) from e
+        resident = profile.name != "laptop" and _free_gb(device) >= profile.objects_resident_min_free_gb
+        if not resident:
+            tracker.close()
+            tracker = None
+        segs_raw = [s for t in tracks if (s := track_to_segment(t, depths, Ks_small, c2w, h, w)) is not None]
+        segs = sorted(merge_segments(segs_raw), key=lambda s: -s.volume())
+        log(
+            f"objects: track {n} frames -> {len(tracks)} tracks, {len(segs_raw)} segments, {len(segs)} after merge, "
+            f"{time.monotonic() - t0:.1f}s"
+        )
+
+        # --- verification (0.55 -> 0.9) ---
+        t0 = time.monotonic()
+        on_progress(0.55, STAGE_VERIFY)
+        supports = {i: support_of(seg, room, segs[:i]) for i, seg in enumerate(segs)}
+        rng = random.Random(0)
+        try:
+            vlm = _vlm(device, profile)
+        except DownloadError as e:
+            raise ModelDownloadFailed(str(e)) from e
+        used: set[int] = set()
+        verified: list[Verified] = []
+        for li, level in enumerate(("structure", "furniture", "item")):
+            try:
+                verified += _verify_level(level, segs, supports, room, vlm, frames, cap.root, rng, used, log)
+            except DownloadError as e:
+                raise ModelDownloadFailed(str(e)) from e
+            on_progress(0.55 + 0.3 * (li + 1) / 3, STAGE_VERIFY)
+        before = len(verified)
+        verified = harmony_filter(verified, room)
+        vlm.close()
+        vlm = None
+        if tracker is not None:
+            tracker.close()
+            tracker = None
+        counts = {lv: sum(v.entry.level == lv for v in verified) for lv in ("structure", "furniture", "item")}
+        log(
+            f"objects: verify {len(segs)} segments -> {before} confirmed, {len(verified)} after harmony {counts}, "
+            f"{time.monotonic() - t0:.1f}s"
+        )
+
+        # --- assignment (0.9 -> 0.97) ---
+        t0 = time.monotonic()
+        on_progress(0.9, STAGE_ASSIGN)
+        positions = read_splat_positions(job_dir / "scene.splat")
+        # object ids 1..N in verified order (structure openings, furniture, items)
+        ids = assign_mod.assign_by_voxels(positions, [v.seg for v in verified])
+        openings = [(i + 1, v.seg) for i, v in enumerate(verified) if v.entry.en in ("door", "window")]
+        ids, structure_ids = assign_mod.assign_structure(positions, room, ids, first_id=len(verified) + 1, openings=openings)
+        structure_kinds: list[tuple[str, Wall | None]] = []
+        if room.floor_y is not None:
+            structure_kinds.append(("floor", None))
+        if room.ceiling_y is not None:
+            structure_kinds.append(("ceiling", None))
+        structure_kinds += [("wall", wl) for wl in room.walls]
+        assert len(structure_kinds) == len(structure_ids)
+
+        # drop anything that owns no Gaussian (cannot be highlighted), renumber 1..M
+        counts_g = np.bincount(ids, minlength=len(verified) + len(structure_ids) + 1)
+        keep_obj = [i for i in range(len(verified)) if counts_g[i + 1] > 0]
+        keep_struct = [k for k, sid in enumerate(structure_ids) if counts_g[sid] > 0]
+        remap = np.zeros(len(counts_g), dtype=np.uint16)
+        new_id = 1
+        obj_new: dict[int, int] = {}
+        for i in keep_obj:
+            remap[i + 1] = new_id
+            obj_new[i] = new_id
+            new_id += 1
+        for k in keep_struct:
+            remap[structure_ids[k]] = new_id
+            new_id += 1
+        ids = remap[ids]
+        dropped = (len(verified) - len(keep_obj)) + (len(structure_ids) - len(keep_struct))
+        log(
+            f"objects: assign {len(positions)} gaussians, {int((ids > 0).sum())} assigned, {dropped} without gaussians dropped, "
+            f"{time.monotonic() - t0:.1f}s"
+        )
+
+        # --- records, thumbnails, relations, table (0.97 -> 1.0) ---
+        t0 = time.monotonic()
         if out_dir.exists():
             shutil.rmtree(out_dir)
         (out_dir / "thumbs").mkdir(parents=True)
-        records: list[table.ObjectRecord] = []
-        for oi, obj in enumerate(merged):
-            oid = oi + 1
-            best = max(obj.members, key=lambda di: dets[di].score * det_areas[di])
-            img = Image.open(cap.root / frames[dets[best].frame].image).convert("RGB")
-            crop_thumbnail(img, dets[best].box).save(out_dir / "thumbs" / f"{oid}.jpg", quality=85)
+        verified_index = {id(v.seg): i for i, v in enumerate(verified)}  # segment -> position in verified
+        records: list[ObjectRecord] = []
+        for i in keep_obj:
+            v = verified[i]
+            oid = obj_new[i]
+            support = v.support
+            if support.startswith("on:"):  # on:<index into segs> -> on:<final object id>, or none if that object was dropped
+                vi = verified_index.get(id(segs[int(support.split(":")[1])]))
+                support = f"on:{obj_new[vi]}" if vi is not None and vi in obj_new else "none"
+            fi, box = v.seg.best_views[0]
+            img = Image.open(cap.root / frames[fi].image).convert("RGB")
+            crop_thumbnail(img, box).save(out_dir / "thumbs" / f"{oid}.jpg", quality=85)
+            lo, hi = v.seg.bbox_min, v.seg.bbox_max
             records.append(
-                table.ObjectRecord(
-                    id=oid,
-                    label=obj.label,
-                    label_zh=zh_label(obj.label),
-                    score=float(obj.score),
-                    views=int(obj.views),
-                    center=tuple(float(v) for v in obj.center),
-                    bbox_min=tuple(float(v) for v in obj.bbox_min),
-                    bbox_max=tuple(float(v) for v in obj.bbox_max),
-                    gaussian_count=int((ids == oid).sum()),
+                ObjectRecord(
+                    id=oid, label=v.entry.en, label_zh=v.entry.zh, score=float(v.confidence), views=len(v.seg.frames),
+                    center=tuple(float(x) for x in (lo + hi) / 2), bbox_min=tuple(float(x) for x in lo),
+                    bbox_max=tuple(float(x) for x in hi), gaussian_count=int((ids == oid).sum()), level=v.entry.level,
+                    size=tuple(float(x) for x in v.seg.size_lwh), support=support, confidence=float(v.confidence),
                 )
             )
+        first_img = Image.open(cap.root / frames[0].image).convert("RGB")
+        xz = cloud[:, [0, 2]] if len(cloud) else np.zeros((1, 2))
+        for k in keep_struct:
+            kind, wall = structure_kinds[k]
+            oid = int(remap[structure_ids[k]])
+            if kind == "wall":
+                lo, hi = _wall_bbox(wall)
+            else:
+                y = room.floor_y if kind == "floor" else room.ceiling_y
+                lo = np.array([xz[:, 0].min(), y - 0.05, xz[:, 1].min()])
+                hi = np.array([xz[:, 0].max(), y + 0.05, xz[:, 1].max()])
+            crop_thumbnail(first_img, (0, 0, first_img.width, first_img.height)).save(out_dir / "thumbs" / f"{oid}.jpg", quality=85)
+            records.append(
+                ObjectRecord(
+                    id=oid, label=kind, label_zh=STRUCTURE_ZH[kind], score=1.0, views=n,
+                    center=tuple(float(x) for x in (lo + hi) / 2), bbox_min=tuple(float(x) for x in lo),
+                    bbox_max=tuple(float(x) for x in hi), gaussian_count=int((ids == oid).sum()), level="structure",
+                    size=(float(hi[0] - lo[0]), float(hi[2] - lo[2]), float(hi[1] - lo[1])), support="none", confidence=1.0,
+                )
+            )
+        records.sort(key=lambda r: r.id)
         home_look = c2w[0][:3, 2] if len(c2w) else None  # OpenCV +Z = view direction
-        relations = compute_relations(records, home_look)
-        table.write_objects(out_dir, job_dir.name, len(frames), ids, records, relations)
-        _log(job_dir, f"objects: thumbs+relations {time.monotonic() - t0:.1f}s; total {time.monotonic() - t_start:.1f}s")
+        relations = compute_relations([r for r in records if r.level != "structure"], home_look)
+        write_objects(out_dir, job_dir.name, n, ids, records, relations, structure=room.to_json())
+        log(
+            f"objects: table {len(records)} records ({len(keep_obj)} objects + {len(keep_struct)} structure), "
+            f"thumbs+relations {time.monotonic() - t0:.1f}s; total {time.monotonic() - t_start:.1f}s"
+        )
         on_progress(1.0, None)
         return len(records)
     finally:
-        if detector is not None:
-            try:
-                detector.close()
-            except Exception:  # pragma: no cover
-                traceback.print_exc()
+        for m in (tracker, vlm):
+            if m is not None:
+                try:
+                    m.close()
+                except Exception:  # pragma: no cover
+                    traceback.print_exc()
         shutil.rmtree(workdir, ignore_errors=True)

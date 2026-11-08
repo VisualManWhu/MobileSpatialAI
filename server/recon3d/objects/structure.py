@@ -90,24 +90,47 @@ def _plane_from_points(p: np.ndarray) -> tuple[np.ndarray, float] | None:
     return n, float(-n @ p[0])
 
 
-def _ransac_plane(points: np.ndarray, want: str, inlier_m: float, angle_deg: float, iters: int, rng) -> tuple[np.ndarray, float, np.ndarray] | None:
-    """Best plane of kind `want` ("horizontal": normal within angle_deg of ±Y; "vertical": at least
-    angle_deg from Y) among `iters` random triplets. Returns (normal, d, inlier mask) or None."""
-    if len(points) < 3:
+def _horizontal_planes(points: np.ndarray, inlier_m: float, min_count: int) -> list[tuple[float, np.ndarray]]:
+    """Horizontal planes as peaks of the y histogram (poses are gravity-aligned, so the normal is +Y):
+    returns (y, inlier mask) per peak with at least min_count points within ±inlier_m, largest first.
+    Sampling random triplets would need all three on the same plane (p^3): hopeless for a sparse floor."""
+    y = points[:, 1]
+    if len(y) == 0:
+        return []
+    edges = np.arange(y.min() - inlier_m, y.max() + 2 * inlier_m, inlier_m)
+    hist, _ = np.histogram(y, bins=edges)
+    centres = (edges[:-1] + edges[1:]) / 2
+    out: list[tuple[float, np.ndarray]] = []
+    taken = np.zeros(len(points), dtype=bool)
+    for b in np.argsort(-hist):
+        if hist[b] * 3 < min_count:  # a plane's inliers spread over ~3 bins
+            break
+        inl = (np.abs(y - centres[b]) < inlier_m) & ~taken
+        if inl.sum() < min_count:
+            continue
+        yy = float(y[inl].mean())
+        inl = (np.abs(y - yy) < inlier_m) & ~taken
+        if inl.sum() < min_count:
+            continue
+        out.append((yy, inl))
+        taken |= inl
+    return out
+
+
+def _ransac_vertical(points: np.ndarray, inlier_m: float, iters: int, rng) -> tuple[np.ndarray, float, np.ndarray] | None:
+    """Best vertical plane (contains the up direction) through random point pairs: the plane's
+    normal is the horizontal perpendicular of the pair's XZ offset (p^2 sampling, not p^3)."""
+    if len(points) < 2:
         return None
-    cos_lim = np.cos(np.radians(angle_deg))
     best = None
     for _ in range(iters):
-        idx = rng.choice(len(points), 3, replace=False)
-        fit = _plane_from_points(points[idx])
-        if fit is None:
+        i, j = rng.choice(len(points), 2, replace=False)
+        dx, dz = points[j, 0] - points[i, 0], points[j, 2] - points[i, 2]
+        norm = np.hypot(dx, dz)
+        if norm < 0.2:  # pairs too close give unstable normals
             continue
-        n, d = fit
-        c = abs(n @ UP)
-        if want == "horizontal" and c < cos_lim:
-            continue
-        if want == "vertical" and c > cos_lim:
-            continue
+        n = np.array([-dz / norm, 0.0, dx / norm])
+        d = float(-n @ points[i])
         dist = np.abs(points @ n + d)
         inl = dist < inlier_m
         count = int(inl.sum())
@@ -151,17 +174,14 @@ def fit_room(
     area_per_pt = voxel_m * voxel_m
 
     # --- horizontal planes ---
-    horizontals: list[tuple[float, int]] = []  # (y, inlier count)
-    while len(remaining) >= 3:
-        fit = _ransac_plane(remaining, "horizontal", inlier_m, horizontal_deg, iters, rng)
-        if fit is None:
-            break
-        n, d, inl = fit
-        if inl.sum() * area_per_pt < min_floor_area_m2:
-            break
-        y = float(remaining[inl][:, 1].mean())
-        horizontals.append((y, int(inl.sum())))
-        remaining = remaining[~inl]
+    min_count = int(np.ceil(min_floor_area_m2 / area_per_pt))
+    planes = _horizontal_planes(remaining, inlier_m, min_count)
+    horizontals: list[tuple[float, int]] = [(y, int(inl.sum())) for y, inl in planes]
+    if planes:
+        drop = np.zeros(len(remaining), dtype=bool)
+        for _, inl in planes:
+            drop |= inl
+        remaining = remaining[~drop]
     floor_y = ceiling_y = None
     if horizontals:
         cam_min, cam_max = cams[:, 1].min(), cams[:, 1].max()
@@ -174,7 +194,7 @@ def fit_room(
     walls: list[Wall] = []
     raw: list[tuple[np.ndarray, float, np.ndarray]] = []
     while len(remaining) >= 3:
-        fit = _ransac_plane(remaining, "vertical", inlier_m, vertical_deg, iters, rng)
+        fit = _ransac_vertical(remaining, inlier_m, iters, rng)
         if fit is None:
             break
         n, d, inl = fit

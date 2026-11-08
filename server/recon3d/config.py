@@ -92,9 +92,23 @@ class Profile:
     mono_lambda: float = 0.1
     mono_lambda_end: float = 0.01
     mono_patch: int = 64
+    # Object recognition v2 (objects/pipeline.py): proposer, video tracker and the VLM that confirms
+    # labels. The laptop (8 GB) runs the small models serially with a 4-bit VLM; the server keeps all
+    # three resident when at least objects_resident_min_free_gb of GPU memory is free at start.
+    objects_detector: str = "IDEA-Research/grounding-dino-tiny"
+    objects_sam: str = "facebook/sam2.1-hiera-small"
+    objects_vlm: str = "Qwen/Qwen2.5-VL-3B-Instruct"
+    objects_vlm_4bit: bool = True
+    objects_resident_min_free_gb: float = 30.0
 
 
 PROFILES: dict[str, Profile] = {
     "laptop": Profile("laptop", 960, 15000, 1_500_000, 1),
-    "server": Profile("server", 1600, 30000, 4_000_000, 3),
+    "server": Profile(
+        "server", 1600, 30000, 4_000_000, 3,
+        objects_detector="IDEA-Research/grounding-dino-base",
+        objects_sam="facebook/sam2.1-hiera-large",
+        objects_vlm="Qwen/Qwen2.5-VL-7B-Instruct",
+        objects_vlm_4bit=False,
+    ),
 }

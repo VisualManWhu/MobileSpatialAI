@@ -43,6 +43,6 @@ def test_detector_recognises_real_office_objects(detector):
     labels = {o.label for o in out}
     assert len(labels & {"chair", "bottle", "box", "plant", "book", "remote control", "door"}) >= 3
     # NMS: no two kept boxes overlap heavily
-    from recon3d.objects.merge import _box_iou_2d
+    from recon3d.objects.detect import box_iou as _box_iou_2d
 
     assert all(_box_iou_2d(a.box, b.box) < 0.7 for i, a in enumerate(out) for b in out[i + 1 :])

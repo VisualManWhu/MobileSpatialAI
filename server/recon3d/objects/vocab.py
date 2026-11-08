@@ -9,6 +9,7 @@ from typing import Literal
 Level = Literal["structure", "furniture", "item"]
 
 FLOOR, WALL, CEILING, ON = "floor", "wall", "ceiling", "on"
+SIZE_TOL_M = 0.03  # voxel quantisation (2 cm cells) inflates measured sizes by about one cell
 
 
 @dataclass(frozen=True)
@@ -121,10 +122,11 @@ def candidates(size_lwh: tuple[float, float, float], support: str, level: Level)
     l, w, h = size_lwh
     longest = max(l, w)
     kind = support_kind(support)
+    t = SIZE_TOL_M
     return [
         e
         for e in by_level(level)
-        if e.h_min <= h <= e.h_max and e.l_min <= longest <= e.l_max and (kind == "none" or kind in e.supports)
+        if e.h_min - t <= h <= e.h_max + t and e.l_min - t <= longest <= e.l_max + t and (kind == "none" or kind in e.supports)
     ]
 
 
