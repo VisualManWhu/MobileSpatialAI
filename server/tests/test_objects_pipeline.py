@@ -155,5 +155,7 @@ def test_pipeline_drops_rarely_seen_and_unhighlightable_objects(tmp_path, monkey
     assert set(ids.tolist()) <= set(range(len(labels) + 1))  # ids stay 1..N after dropping
 
 
-def test_min_views_default_is_three():
-    assert op.MIN_VIEWS == 3
+def test_min_views_default_is_six():
+    # Raised 3 -> 6 after the phone-side review of the 76-object office run: objects seen in 3-5 of
+    # the ~225 sampled frames were almost all flickering false positives.
+    assert op.MIN_VIEWS == 6

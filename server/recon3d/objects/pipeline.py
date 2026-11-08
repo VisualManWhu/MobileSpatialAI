@@ -28,9 +28,10 @@ STAGE_THUMBS = "识别物体 (截图)"
 MAX_FRAMES = 240
 DEPTH_SCALE = 0.5
 MAX_POINTS_PER_DETECTION = 2000
-# Sampled frames are ~1 s apart on a dense trajectory: an object "seen" in only 2 of them is almost
-# always a flicker (first office run: 87 of 169 objects, mostly windows/doors/lamps that were not there).
-MIN_VIEWS = 3
+# Sampled frames are ~1 s apart on a dense trajectory: an object "seen" in only a handful of them is
+# almost always a flicker (first office run: 87 of 169 objects in 2 frames, mostly windows/doors/lamps
+# that were not there; at MIN_VIEWS=3 the phone review still found the 3-5 frame ones to be noise).
+MIN_VIEWS = 6
 
 # Injection points for tests (resolved lazily: the real ones import torch/transformers).
 detector_factory = None  # (device) -> object with detect(PIL.Image) -> list[FrameDetection], close()
