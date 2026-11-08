@@ -112,7 +112,7 @@ fun ViewerScreen(repo: RoomRepository, roomId: String, captureId: String, object
     }
     when (val h = home) {
         null -> Message(MSG_LOADING)
-        else -> SceneViewer(record.scenePath!!, home = h.getOrNull(), objectsPath = record.objectsPath) { webView, loaded ->
+        else -> SceneViewer(record.scenePath!!, home = h.getOrNull(), objectsPath = record.objectsPath, objectsVersion = record.objectsVersion) { webView, loaded ->
             ObjectsOverlay(record = record, loaded = loaded, webView = webView, onStart = { objects.start(roomId, record.id) })
         }
     }
@@ -129,6 +129,7 @@ internal fun SceneViewer(
     scenePath: String,
     home: HomeView? = null,
     objectsPath: String? = null,
+    objectsVersion: Int = 0,
     overlay: @Composable (webView: WebView?, loaded: Boolean) -> Unit = { _, _ -> },
 ) {
     // Each retry bumps the attempt: a fresh WebView, a fresh watchdog, stale callbacks ignored.
@@ -158,8 +159,8 @@ internal fun SceneViewer(
     }
 
     val loaded = state is ViewerState.Loaded
-    // Whenever the scene is up and an object table exists (or changes), hand the ids to the page.
-    LaunchedEffect(loaded, objectsPath, webView) {
+    // Whenever the scene is up and an object table exists (or a new one was unpacked), hand the ids to the page.
+    LaunchedEffect(loaded, objectsPath, objectsVersion, webView) {
         val wv = webView ?: return@LaunchedEffect
         if (loaded && objectsPath != null) wv.evaluateJavascript("window.loadObjects('/scene/${ScenePathPolicy.OBJECTS_NAME}')", null)
     }
@@ -215,14 +216,17 @@ private fun ObjectsOverlay(record: CaptureRecord, loaded: Boolean, webView: WebV
     var menuOpen by remember { mutableStateOf(false) }
     var highlighted by remember(record.id) { mutableStateOf<Pair<Int, String>?>(null) } // id to title
     val snackbar = remember { SnackbarHostState() }
-    val table by produceState<ObjectsTable?>(initialValue = null, record.objectsPath) {
+    val table by produceState<ObjectsTable?>(initialValue = null, record.objectsPath, record.objectsVersion) {
         value = record.objectsPath?.let { dir -> withContext(Dispatchers.IO) { runCatching { ObjectsTable.load(File(dir)) }.getOrNull() } }
     }
     LaunchedEffect(record.objectsState, record.objectsMessage) {
         objectsFailureText(record)?.let { snackbar.showSnackbar(it) }
     }
-    val done = record.objectsState == "done" && table != null
-    val busy = record.objectsState == "queued" || record.objectsState == "running"
+    val hasTable = table != null
+    val action = objectsChipAction(record, hasTable)
+    val offersRerun = objectsMenuOffersRerun(record, hasTable)
+    // A new table replaces the list and the page's ids: any highlight now points at stale ids.
+    LaunchedEffect(record.objectsVersion) { highlighted = null }
 
     Box(Modifier.fillMaxSize()) {
         if (loaded) {
@@ -232,8 +236,14 @@ private fun ObjectsOverlay(record: CaptureRecord, loaded: Boolean, webView: WebV
                     color = Color.White.copy(alpha = 0.18f),
                     contentColor = Color.White,
                     modifier = Modifier.combinedClickable(
-                        onClick = { if (done) sheetOpen = true else if (!busy) onStart() },
-                        onLongClick = { if (done) menuOpen = true },
+                        onClick = {
+                            when (action) {
+                                ChipAction.OPEN_LIST -> sheetOpen = true
+                                ChipAction.START -> onStart()
+                                ChipAction.NONE -> Unit
+                            }
+                        },
+                        onLongClick = { if (offersRerun) menuOpen = true },
                     ),
                 ) {
                     Text(objectsChipLabel(record), Modifier.padding(horizontal = 14.dp, vertical = 6.dp), style = MaterialTheme.typography.bodyMedium)

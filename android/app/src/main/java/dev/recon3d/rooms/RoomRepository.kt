@@ -69,6 +69,8 @@ data class CaptureRecord(
     val objectsCount: Int = 0,
     /** Directory holding the unpacked `objects.json` / `objects.bin` / `thumbs/`; kept across a failed re-run. */
     val objectsPath: String? = null,
+    /** Bumped every time a new table is unpacked into [objectsPath] (the path itself never changes). */
+    val objectsVersion: Int = 0,
 )
 
 /**

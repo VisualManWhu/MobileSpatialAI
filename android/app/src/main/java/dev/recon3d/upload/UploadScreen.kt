@@ -384,7 +384,7 @@ private fun List<String>.plusDistinct(id: String): List<String> = if (id in this
 
 /** A new server job has no object table: drop the fields (the old files go with the capture dir). */
 private fun CaptureRecord.withoutObjects(): CaptureRecord =
-    copy(objectsState = "none", objectsProgress = 0f, objectsMessage = null, objectsCount = 0, objectsPath = null)
+    copy(objectsState = "none", objectsProgress = 0f, objectsMessage = null, objectsCount = 0, objectsPath = null, objectsVersion = 0)
 
 /** Chinese status line for a capture row, e.g. `训练中 42%` or `失败：<原因>`. */
 fun captureStatusText(record: CaptureRecord): String {

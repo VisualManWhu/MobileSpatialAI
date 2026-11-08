@@ -21,6 +21,8 @@ import kotlin.time.Duration.Companion.seconds
 const val MSG_OBJECTS_NO_JOB = "任务已不在服务端，请先重新上传"
 const val MSG_OBJECTS_BAD_ZIP = "物体表文件损坏，请重新识别"
 private const val MSG_JOB_GONE = "任务不存在"
+/** Server detail when recognition is already queued / running: attach to it instead of failing. */
+private const val MSG_OBJECTS_ACTIVE = "正在识别"
 private const val MSG_OBJECTS_UNEXPECTED = "出错了，请重试；如反复出现请重启应用"
 private const val CHIP_IDLE = "识别物体"
 private const val CHIP_QUEUED = "排队中"
@@ -53,11 +55,17 @@ class ObjectsViewModel(
         val status = try {
             api.requestObjects(jobId)
         } catch (e: ApiException) {
-            fail(roomId, captureId, e.messageZh)
-            return@launchOnce
+            if (e.messageZh != MSG_OBJECTS_ACTIVE) {
+                fail(roomId, captureId, e.messageZh)
+                return@launchOnce
+            }
+            // The server is already on it (we lost track, e.g. after polling gave up): follow that run.
+            null
         }
-        repo.editCapture(roomId, captureId) {
-            it.copy(objectsState = status.state, objectsProgress = status.progress, objectsMessage = status.message)
+        if (status != null) {
+            repo.editCapture(roomId, captureId) {
+                it.copy(objectsState = status.state, objectsProgress = status.progress, objectsMessage = status.message)
+            }
         }
         track(roomId, captureId, jobId)
     }
@@ -110,7 +118,7 @@ class ObjectsViewModel(
                     repo.editCapture(roomId, captureId) {
                         it.copy(
                             objectsState = "done", objectsProgress = 1f, objectsMessage = null,
-                            objectsCount = objects.count, objectsPath = finalDir.path,
+                            objectsCount = objects.count, objectsPath = finalDir.path, objectsVersion = it.objectsVersion + 1,
                         )
                     }
                     return
@@ -213,6 +221,23 @@ fun objectsChipLabel(record: CaptureRecord): String = when (record.objectsState)
     "failed" -> CHIP_RETRY
     else -> CHIP_IDLE
 }
+
+/** What a tap on the objects chip does. */
+enum class ChipAction { START, OPEN_LIST, NONE }
+
+/**
+ * Tap: open the list whenever a table is on disk (also during a re-run and after a failed one, so the
+ * old table stays usable); otherwise start recognition unless one is already going.
+ */
+fun objectsChipAction(record: CaptureRecord, hasTable: Boolean): ChipAction = when {
+    hasTable -> ChipAction.OPEN_LIST
+    record.objectsState == "queued" || record.objectsState == "running" -> ChipAction.NONE
+    else -> ChipAction.START
+}
+
+/** Long-press menu entry 「重新识别」: offered whenever a table exists and no run is in progress. */
+fun objectsMenuOffersRerun(record: CaptureRecord, hasTable: Boolean): Boolean =
+    hasTable && record.objectsState != "queued" && record.objectsState != "running"
 
 /** `识别失败：<reason>` for a failed record, else null. */
 fun objectsFailureText(record: CaptureRecord): String? =

@@ -28,6 +28,9 @@ STAGE_THUMBS = "识别物体 (截图)"
 MAX_FRAMES = 240
 DEPTH_SCALE = 0.5
 MAX_POINTS_PER_DETECTION = 2000
+# Sampled frames are ~1 s apart on a dense trajectory: an object "seen" in only 2 of them is almost
+# always a flicker (first office run: 87 of 169 objects, mostly windows/doors/lamps that were not there).
+MIN_VIEWS = 3
 
 # Injection points for tests (resolved lazily: the real ones import torch/transformers).
 detector_factory = None  # (device) -> object with detect(PIL.Image) -> list[FrameDetection], close()
@@ -121,7 +124,10 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
         except DownloadError as e:
             raise ModelDownloadFailed(str(e)) from e
         dets: list[merge_mod.Detection] = []
-        det_masks: list[np.ndarray] = []  # full-res bool masks, parallel to dets
+        # Depth-resolution masks, bit-packed (a full-res SAM mask is ~2 MB; 1000+ detections would hold
+        # gigabytes), plus each mask's full-res area for picking the thumbnail; both parallel to dets.
+        det_masks: list[np.ndarray] = []
+        det_areas: list[float] = []
         depths: list[np.ndarray] = []
         depth_iter = _render_depths(job_dir / "scene.ply", c2w, Ks, W, H, device=device, scale=DEPTH_SCALE)
         for fi, (frame, depth) in enumerate(zip(frames, depth_iter)):
@@ -132,9 +138,12 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
             except DownloadError as e:
                 raise ModelDownloadFailed(str(e)) from e
             for fd in found:
-                pts = _backproject(_shrink(fd.mask, w, h), depth, Ks_small[fi], c2w[fi])
+                small = _shrink(fd.mask, w, h)
+                pts = _backproject(small, depth, Ks_small[fi], c2w[fi])
                 dets.append(merge_mod.Detection(fi, fd.label, fd.score, fd.box, pts))
-                det_masks.append(fd.mask)
+                det_masks.append(np.packbits(small))
+                det_areas.append(float(fd.mask.sum()))
+            del found
             on_progress(0.6 * (fi + 1) / len(frames), STAGE_DETECT)
         detector.close()
         detector = None
@@ -143,7 +152,7 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
         # --- merge (0.6 -> 0.75) ---
         t0 = time.monotonic()
         on_progress(0.6, STAGE_MERGE)
-        merged = merge_mod.merge_detections(dets)
+        merged = merge_mod.merge_detections(dets, min_views=MIN_VIEWS)
         _log(job_dir, f"objects: merge -> {len(merged)} objects, {time.monotonic() - t0:.1f}s")
 
         # --- assign (0.75 -> 0.95) ---
@@ -151,7 +160,7 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
         on_progress(0.75, STAGE_ASSIGN)
         positions = read_splat_positions(job_dir / "scene.splat")
         masks = [
-            assign_mod.ObjectMasks(dets[di].frame, oi + 1, _shrink(det_masks[di], w, h))
+            assign_mod.ObjectMasks(dets[di].frame, oi + 1, np.unpackbits(det_masks[di])[: h * w].reshape(h, w).astype(bool))
             for oi, obj in enumerate(merged)
             for di in obj.members
         ]
@@ -164,9 +173,19 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
             )
         else:
             ids = np.zeros(len(positions), dtype=np.uint16)
+        # An object without a single Gaussian cannot be highlighted: drop it and renumber the rest 1..N.
+        counts = np.bincount(ids, minlength=len(merged) + 1)
+        keep = [oi for oi in range(len(merged)) if counts[oi + 1] > 0]
+        remap = np.zeros(len(merged) + 1, dtype=np.uint16)
+        for new_id, oi in enumerate(keep, start=1):
+            remap[oi + 1] = new_id
+        ids = remap[ids]
+        dropped = len(merged) - len(keep)
+        merged = [merged[oi] for oi in keep]
         _log(
             job_dir,
-            f"objects: assign {len(positions)} gaussians, {int((ids > 0).sum())} assigned, {time.monotonic() - t0:.1f}s",
+            f"objects: assign {len(positions)} gaussians, {int((ids > 0).sum())} assigned, "
+            f"{dropped} objects without gaussians dropped, {time.monotonic() - t0:.1f}s",
         )
 
         # --- thumbnails + relations + table (0.95 -> 1.0) ---
@@ -178,7 +197,7 @@ def run_objects(job_dir: Path, profile: Profile, on_progress: OnProgress) -> int
         records: list[table.ObjectRecord] = []
         for oi, obj in enumerate(merged):
             oid = oi + 1
-            best = max(obj.members, key=lambda di: dets[di].score * float(det_masks[di].sum()))
+            best = max(obj.members, key=lambda di: dets[di].score * det_areas[di])
             img = Image.open(cap.root / frames[dets[best].frame].image).convert("RGB")
             crop_thumbnail(img, dets[best].box).save(out_dir / "thumbs" / f"{oid}.jpg", quality=85)
             records.append(

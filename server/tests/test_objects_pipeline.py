@@ -123,3 +123,37 @@ def test_pipeline_uses_poses_cv_when_present(tmp_path, monkeypatch):
 def test_frame_sampling_caps_at_240():
     assert op.sample_indices(1123) == list(range(0, 1123, 5)) and len(op.sample_indices(1123)) <= 240
     assert op.sample_indices(100) == list(range(100))
+
+
+def test_pipeline_drops_rarely_seen_and_unhighlightable_objects(tmp_path, monkeypatch):
+    """Objects seen in < MIN_VIEWS sampled frames are noise on a dense trajectory; objects that got no
+    Gaussian cannot be highlighted on the phone, so neither reaches the table (E2E: 87/169 and 35/169)."""
+    job = _job(tmp_path)
+
+    def dets(i, size):
+        W, H = size
+        out = [centre_box(size)]  # the real cup: every frame
+        if i < 2:  # a "box" glimpsed in only 2 of 6 frames, elsewhere in the image
+            m = np.zeros((H, W), bool)
+            m[0 : H // 8, 0 : W // 8] = True
+            out.append(FrameDetection("box", 0.9, (0, 0, W / 8, H / 8), m))
+        if i >= 3:  # a "lamp" seen in 3 frames whose mask never covers a rendered surface -> 0 gaussians
+            m = np.zeros((H, W), bool)
+            m[H - 2 :, W - 2 :] = True
+            out.append(FrameDetection("lamp", 0.8, (W - 2, H - 2, W, H), m))
+        return out
+
+    _install(monkeypatch, dets)
+    monkeypatch.setattr(op, "MIN_VIEWS", 3)
+    count = run_objects(job, PROFILES["laptop"], lambda p, m: None)
+    j = json.loads((job / "objects" / "objects.json").read_text(encoding="utf-8"))
+    labels = [o["label"] for o in j["objects"]]
+    assert "box" not in labels, "2 of 6 views is below MIN_VIEWS"
+    assert all(o["gaussian_count"] > 0 for o in j["objects"]), "unhighlightable objects are dropped"
+    assert labels[0] == "cup" and count == len(j["objects"])
+    ids = np.frombuffer((job / "objects" / "objects.bin").read_bytes(), "<u2")
+    assert set(ids.tolist()) <= set(range(len(labels) + 1))  # ids stay 1..N after dropping
+
+
+def test_min_views_default_is_three():
+    assert op.MIN_VIEWS == 3

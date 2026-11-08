@@ -164,4 +164,45 @@ class ObjectsViewModelTest {
         assertEquals("重试识别", objectsChipLabel(base.copy(objectsState = "failed")))
         assertNull(objectsFailureText(base))
     }
+
+    @Test fun eachUnpackBumpsTheVersionSoTheViewerReloads() = runTest {
+        val vm = vm()
+        assertEquals(0, rec().objectsVersion)
+        api.objectsStatuses.add(ObjectsStatus("done", 1f, "完成", 1))
+        vm.start(room, cap); advanceUntilIdle()
+        assertEquals(1, rec().objectsVersion)
+        api.objectsZip = fakeZip(objectsJson(count = 2))
+        api.objectsStatuses.add(ObjectsStatus("done", 1f, "完成", 2))
+        vm.start(room, cap); advanceUntilIdle()
+        assertEquals(2, rec().objectsVersion)
+        assertEquals(rec().objectsPath, rec().objectsPath) // same directory, new version
+    }
+
+    @Test fun alreadyRunningOnServerAttachesInsteadOfFailing() = runTest {
+        api.requestObjectsFailure = ApiException("正在识别", code = 409)
+        api.objectsStatuses.addAll(listOf(ObjectsStatus("running", 0.5f, "识别物体 (检测)", 0), ObjectsStatus("done", 1f, "完成", 1)))
+        vm().start(room, cap); runCurrent()
+        assertEquals("running", rec().objectsState)
+        advanceUntilIdle()
+        assertEquals("done", rec().objectsState)
+        assertEquals(listOf("j"), api.requestObjectsCalls)
+    }
+
+    @Test fun chipActions() {
+        val base = CaptureRecord(id = cap, zipPath = "")
+        assertEquals(ChipAction.START, objectsChipAction(base, hasTable = false))
+        assertEquals(ChipAction.NONE, objectsChipAction(base.copy(objectsState = "queued"), hasTable = false))
+        assertEquals(ChipAction.NONE, objectsChipAction(base.copy(objectsState = "running"), hasTable = false))
+        // an older table stays reachable while a re-run is going and after it failed
+        assertEquals(ChipAction.OPEN_LIST, objectsChipAction(base.copy(objectsState = "running"), hasTable = true))
+        assertEquals(ChipAction.OPEN_LIST, objectsChipAction(base.copy(objectsState = "failed"), hasTable = true))
+        assertEquals(ChipAction.START, objectsChipAction(base.copy(objectsState = "failed"), hasTable = false))
+        assertEquals(ChipAction.OPEN_LIST, objectsChipAction(base.copy(objectsState = "done"), hasTable = true))
+        assertEquals(ChipAction.START, objectsChipAction(base.copy(objectsState = "done"), hasTable = false))
+        // the long-press menu offers a re-run whenever one is not already going
+        assertTrue(objectsMenuOffersRerun(base.copy(objectsState = "done"), hasTable = true))
+        assertTrue(objectsMenuOffersRerun(base.copy(objectsState = "failed"), hasTable = true))
+        assertFalse(objectsMenuOffersRerun(base.copy(objectsState = "running"), hasTable = true))
+        assertFalse(objectsMenuOffersRerun(base, hasTable = false))
+    }
 }
